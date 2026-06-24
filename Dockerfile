@@ -1,6 +1,13 @@
 # ប្រើប្រាស់ Base Image របស់ PyTorch ដែលមាន CUDA ស្រាប់ (លឿន និងស្រួល)
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
+# បន្ថែមជួរកូដនេះចូល ដើម្បីដំឡើង gcc, g++ និងឧបករណ៍ចាំបាច់
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # កំណត់កន្លែងធ្វើការក្នុងម៉ាស៊ីន
 WORKDIR /app
 
