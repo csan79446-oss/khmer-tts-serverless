@@ -7,8 +7,6 @@ scipy
 fsspec
 huggingface-hub
 runpod
-fastapi
-uvicorn
 requests
 httpx
 soundfile
