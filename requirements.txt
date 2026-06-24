@@ -19,3 +19,4 @@ idna
 charset-normalizer
 urllib3
 typing-extensions
+transformers
