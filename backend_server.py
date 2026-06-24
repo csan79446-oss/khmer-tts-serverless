@@ -5,15 +5,15 @@ import base64
 import tempfile
 import numpy as np
 import soundfile as sf
+import runpod  # <--- ត្រូវតែដំឡើង និងប្រើប្រាស់សម្រាប់ RunPod Serverless
 from pydantic import BaseModel
-from typing import Optional, Dict
+from typing import Optional
 from voxcpm import VoxCPM
 
-# --- ការកំណត់ម៉ូដែល (Load តែម្តងនៅពេល container ចាប់ផ្តើម) ---
-print("⚙️ កំពុងផ្ទុកម៉ូដែល VoxCPM2...")
-model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
-SAMPLE_RATE = model.tts_model.sample_rate 
-print(f"✅ ម៉ូដែលរួចរាល់! {SAMPLE_RATE}Hz")
+# បង្កើតប្រថាប់ (Global Variable) ទុកសម្រាប់ផ្ទុកម៉ូដែល
+model = None
+SAMPLE_RATE = 24000
+init_error = None
 
 NUMBERS_MAP = {
     '0': 'សូន្យ', '1': 'មួយ', '2': 'ពីរ', '3': 'បី', '4': 'បួន',
@@ -26,7 +26,7 @@ def clean_khmer_text(raw_text: str) -> str:
     text = raw_text
     for digit, word in NUMBERS_MAP.items():
         text = text.replace(digit, word)
-    text = re.sub(r'[^\u1780-\u17F9\s។ៗ?!,a-zA-Z]', '', text)
+    text = re.sub(r'[^\u1780-\u17F9\sAlign។ៗ?!,a-zA-Z]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def srt_time_to_seconds(time_str: str) -> float:
@@ -41,6 +41,21 @@ class SpeakerConfig(BaseModel):
     preset_name: Optional[str] = "[ប្រុស១]"
     ref_audio_base64: Optional[str] = None
 
+# --- មុខងាររត់ដំបូងពេលបើកម៉ាស៊ីន (Init Function) ---
+def init():
+    global model, SAMPLE_RATE, init_error
+    print("⚙️ កំពុងផ្ទុកម៉ូដែល VoxCPM2 ទៅកាន់ GPU...")
+    try:
+        # Load model ចូលទៅកាន់ CUDA (GPU)
+        model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+        if hasattr(model, 'to'):
+            model.to("cuda")
+        SAMPLE_RATE = model.tts_model.sample_rate 
+        print(f"✅ ម៉ូដែលរួចរាល់! {SAMPLE_RATE}Hz")
+    except Exception as e:
+        init_error = str(e)
+        print(f"❌ បរាជ័យក្នុងការផ្ទុកម៉ូដែល: {init_error}")
+
 def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_path: str) -> np.ndarray:
     kwargs = {
         "text": text_chunk,
@@ -49,10 +64,14 @@ def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_pat
         "normalize": True,
         "retry_badcase": True
     }
-    if temp_ref_path and os.path.exists(temp_ref_path):
-        kwargs["reference_wav_path"] = temp_ref_path
-    elif fallback_ref_path and os.path.exists(fallback_ref_path):
-        kwargs["reference_wav_path"] = fallback_ref_path
+    
+    # ជ្រើសរើសផ្លូវឯកសារសំឡេងគំរូ
+    ref_path = temp_ref_path if (temp_ref_path and os.path.exists(temp_ref_path)) else fallback_ref_path
+    
+    if ref_path and os.path.exists(ref_path):
+        # ការពារការខុសជំនាន់កញ្ចប់បណ្ណាល័យ (VoxCPM ខ្លះប្រើ reference_audio ខ្លះប្រើ reference_wav_path)
+        kwargs["reference_audio"] = ref_path 
+        kwargs["reference_wav_path"] = ref_path 
     
     try:
         return model.generate(**kwargs)
@@ -68,7 +87,6 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
     temp_ref_path = None
     fallback_ref_path = None
     
-    # ត្រៀម Reference Audio
     if config.mode == "clone" and config.ref_audio_base64 and len(config.ref_audio_base64.strip()) > 100:
         try:
             b64_str = config.ref_audio_base64.split(",")[1] if "," in config.ref_audio_base64 else config.ref_audio_base64
@@ -77,12 +95,14 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 sf.write(tmp.name, audio_data, orig_sr)
                 temp_ref_path = tmp.name
-        except Exception as e: print(f"⚠️ Clone error: {e}")
+        except Exception as e: 
+            print(f"⚠️ Clone error: {e}")
 
     if not temp_ref_path:
         voice_name = re.sub(r'[\[\]]', '', config.preset_name or "ប្រុស១")
         preset_file = f"{voice_name}.wav"
-        if os.path.exists(preset_file): fallback_ref_path = preset_file
+        if os.path.exists(preset_file): 
+            fallback_ref_path = preset_file
         else:
             fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
             if fallback_files: fallback_ref_path = fallback_files[0]
@@ -97,60 +117,87 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
         seg_wav = _generate_single_audio(sentence, temp_ref_path, fallback_ref_path)
         if len(seg_wav) > 0:
             master_audio_chunks.append(seg_wav)
-            if i < len(sentences) - 1: master_audio_chunks.append(silence_array)
+            if i < len(sentences) - 1: 
+                master_audio_chunks.append(silence_array)
 
-    if temp_ref_path and os.path.exists(temp_ref_path): os.remove(temp_ref_path)
+    if temp_ref_path and os.path.exists(temp_ref_path): 
+        os.remove(temp_ref_path)
+        
     return np.concatenate(master_audio_chunks) if master_audio_chunks else np.array([], dtype=np.float32)
 
-# --- មុខងារកណ្តាលសម្រាប់ RunPod ហៅប្រើ ---
-def process_tts_request(input_data: dict) -> dict:
-    # ទទួលទិន្នន័យពី RunPod event["input"]
+# --- មុខងារចម្បងដែលរត់រាល់ពេលមាន Request (Handler) ---
+def handler(job):
+    global model, init_error
+    
+    # បញ្ឈប់ភ្លាមបើផ្ទុកម៉ូដែលមិនចូល GPU
+    if model is None:
+        return {"error": f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុ៖ {init_error}"}
+
+    input_data = job.get("input", {})
     text = input_data.get("text", "")
     mode = input_data.get("mode", "preset")
     preset_name = input_data.get("preset_name", "[ប្រុស១]")
     ref_audio_base64 = input_data.get("ref_audio_base64", None)
-    speaker_map = input_data.get("speaker_map", None)
-
-    # ការវិភាគតក្កវិជ្ជាសំឡេង
-    if mode == "srt":
-        # (កូដ SRT logic របស់អ្នក)
-        blocks = re.split(r'\n\s*\n', text.strip())
-        master_audio = []
-        last_end_time = 0.0
-        for block in blocks:
-            lines = [l.strip() for l in block.split('\n') if l.strip()]
-            if len(lines) < 3: continue
-            time_match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
-            if not time_match: continue
-            start_sec = srt_time_to_seconds(time_match.group(1))
-            content_line = " ".join(lines[2:])
-            tag_match = re.match(r'^(\[.*?\])\s*(.*)', content_line)
-            speaker_tag = tag_match.group(1) if tag_match else "default"
-            speech_text = tag_match.group(2) if tag_match else content_line
-            
-            # (បន្ថែម Silence និង ហៅ generate_segment)
-            if start_sec > last_end_time:
-                master_audio.append(np.zeros(int((start_sec - last_end_time) * SAMPLE_RATE), dtype=np.float32))
-            
-            cfg = SpeakerConfig(mode="preset", preset_name=speaker_tag)
-            seg_wav = generate_segment(speech_text, cfg)
-            if len(seg_wav) > 0:
-                master_audio.append(seg_wav)
-                last_end_time = start_sec + (len(seg_wav) / SAMPLE_RATE)
-        final_wav = np.concatenate(master_audio)
-    else:
-        cfg = SpeakerConfig(mode=mode, preset_name=preset_name, ref_audio_base64=ref_audio_base64)
-        final_wav = generate_segment(text, cfg)
-
-    # បញ្ចប់ និងបង្កើត Base64
-    if len(final_wav) == 0: return {"status": "error", "message": "No audio generated"}
     
-    max_amp = np.max(np.abs(final_wav))
-    if max_amp > 0: final_wav = final_wav / max_amp
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        sf.write(tmp.name, final_wav, SAMPLE_RATE)
-        out_b64 = base64.b64encode(open(tmp.name, 'rb').read()).decode('utf-8')
-        os.remove(tmp.name)
+    if not text:
+        return {"error": "សូមបញ្ចូលអត្ថបទអក្សរ!"}
+
+    try:
+        if mode == "srt":
+            blocks = re.split(r'\n\s*\n', text.strip())
+            master_audio = []
+            last_end_time = 0.0
+            for block in blocks:
+                lines = [l.strip() for l in block.split('\n') if l.strip()]
+                if len(lines) < 3: continue
+                time_match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
+                if not time_match: continue
+                start_sec = srt_time_to_seconds(time_match.group(1))
+                content_line = " ".join(lines[2:])
+                tag_match = re.match(r'^(\[.*?\])\s*(.*)', content_line)
+                speaker_tag = tag_match.group(1) if tag_match else "default"
+                speech_text = tag_match.group(2) if tag_match else content_line
+                
+                if start_sec > last_end_time:
+                    master_audio.append(np.zeros(int((start_sec - last_end_time) * SAMPLE_RATE), dtype=np.float32))
+                
+                cfg = SpeakerConfig(mode="preset", preset_name=speaker_tag)
+                seg_wav = generate_segment(speech_text, cfg)
+                if len(seg_wav) > 0:
+                    master_audio.append(seg_wav)
+                    last_end_time = start_sec + (len(seg_wav) / SAMPLE_RATE)
+            
+            if master_audio:
+                final_wav = np.concatenate(master_audio)
+            else:
+                return {"error": "រកមិនឃើញឃ្លាដែលមានទម្រង់ SRT ត្រឹមត្រូវទេ"}
+        else:
+            cfg = SpeakerConfig(mode=mode, preset_name=preset_name, ref_audio_base64=ref_audio_base64)
+            final_wav = generate_segment(text, cfg)
+
+        if len(final_wav) == 0: 
+            return {"error": "ដំណើរការបរាជ័យ មិនអាចបង្កើតសំឡេងបានឡើយ"}
         
-    return {"status": "success", "audio_base64": out_b64}
+        # Normalize សំឡេង
+        max_amp = np.max(np.abs(final_wav))
+        if max_amp > 0: 
+            final_wav = final_wav / max_amp
+        
+        # បំប្លែង Audio ទៅជា Base64
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            sf.write(tmp.name, final_wav, SAMPLE_RATE)
+            out_b64 = base64.b64encode(open(tmp.name, 'rb').read()).decode('utf-8')
+            os.remove(tmp.name)
+        
+        # បោះលទ្ធផលត្រឡប់ទៅ App Client វិញ (មានកញ្ចប់ output ត្រឹមត្រូវតាមទម្រង់ RunPod)
+        return {
+            "output": {
+                "audio_base64": out_b64,
+                "status": "success"
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+# --- បើកដំណើរការប្រព័ន្ធរង់ចាំទទួលការងារពី RunPod ---
+runpod.serverless.start({"handler": handler, "init": init})
