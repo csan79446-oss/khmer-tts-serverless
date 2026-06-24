@@ -5,7 +5,7 @@ import base64
 import tempfile
 import numpy as np
 import soundfile as sf
-import runpod  # <--- ត្រូវតែដំឡើង និងប្រើប្រាស់សម្រាប់ RunPod Serverless
+import runpod
 from pydantic import BaseModel
 from typing import Optional
 from voxcpm import VoxCPM
@@ -41,20 +41,19 @@ class SpeakerConfig(BaseModel):
     preset_name: Optional[str] = "[ប្រុស១]"
     ref_audio_base64: Optional[str] = None
 
-# --- មុខងាររត់ដំបូងពេលបើកម៉ាស៊ីន (Init Function) ---
-def init():
+# --- មុខងាររត់ដំបូងបង្អស់ដើម្បីផ្ទុកម៉ូដែល (Explicit Init) ---
+def initialize_model():
     global model, SAMPLE_RATE, init_error
-    print("⚙️ កំពុងផ្ទុកម៉ូដែល VoxCPM2 ទៅកាន់ GPU...")
+    print("⚙️ [STARTUP] កំពុងផ្ទុកម៉ូដែល VoxCPM2 ទៅកាន់ GPU...")
     try:
-        # Load model ចូលទៅកាន់ CUDA (GPU)
         model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
         if hasattr(model, 'to'):
             model.to("cuda")
         SAMPLE_RATE = model.tts_model.sample_rate 
-        print(f"✅ ម៉ូដែលរួចរាល់! {SAMPLE_RATE}Hz")
+        print(f"✅ [SUCCESS] ម៉ូដែលរួចរាល់! {SAMPLE_RATE}Hz")
     except Exception as e:
         init_error = str(e)
-        print(f"❌ បរាជ័យក្នុងការផ្ទុកម៉ូដែល: {init_error}")
+        print(f"❌ [ERROR] បរាជ័យក្នុងការផ្ទុកម៉ូដែល: {init_error}")
 
 def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_path: str) -> np.ndarray:
     kwargs = {
@@ -65,11 +64,8 @@ def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_pat
         "retry_badcase": True
     }
     
-    # ជ្រើសរើសផ្លូវឯកសារសំឡេងគំរូ
     ref_path = temp_ref_path if (temp_ref_path and os.path.exists(temp_ref_path)) else fallback_ref_path
-    
     if ref_path and os.path.exists(ref_path):
-        # ការពារការខុសជំនាន់កញ្ចប់បណ្ណាល័យ (VoxCPM ខ្លះប្រើ reference_audio ខ្លះប្រើ reference_wav_path)
         kwargs["reference_audio"] = ref_path 
         kwargs["reference_wav_path"] = ref_path 
     
@@ -125,13 +121,13 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
         
     return np.concatenate(master_audio_chunks) if master_audio_chunks else np.array([], dtype=np.float32)
 
-# --- មុខងារចម្បងដែលរត់រាល់ពេលមាន Request (Handler) ---
+# --- មុខងារចម្បងរបស់ RunPod Worker ---
 def handler(job):
     global model, init_error
     
-    # បញ្ឈប់ភ្លាមបើផ្ទុកម៉ូដែលមិនចូល GPU
+    # ប្រសិនបើម៉ូដែលផ្ទុកមិនចូល GPU ផ្ញើសារប្រាប់ Client ភ្លាម
     if model is None:
-        return {"error": f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុ៖ {init_error}"}
+        return {"error": f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុពិតប្រាកដ៖ {init_error if init_error else 'ប្រព័ន្ធទាញយកមិនទាន់ចប់ ឬទំហំ GPU មិនគ្រាន់'}"}
 
     input_data = job.get("input", {})
     text = input_data.get("text", "")
@@ -176,20 +172,19 @@ def handler(job):
             final_wav = generate_segment(text, cfg)
 
         if len(final_wav) == 0: 
-            return {"error": "ដំណើរការបរាជ័យ មិនអាចបង្កើតសំឡេងបានឡើយ"}
+            return {"error": "ដំណើរការបរាជ័យ មិនអាចបង្កើតសំឡេងបានឡើយ (Model Returned Empty)"}
         
-        # Normalize សំឡេង
+        # Normalize
         max_amp = np.max(np.abs(final_wav))
         if max_amp > 0: 
             final_wav = final_wav / max_amp
         
-        # បំប្លែង Audio ទៅជា Base64
+        # បំប្លែងទៅជា Base64
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             sf.write(tmp.name, final_wav, SAMPLE_RATE)
             out_b64 = base64.b64encode(open(tmp.name, 'rb').read()).decode('utf-8')
             os.remove(tmp.name)
         
-        # បោះលទ្ធផលត្រឡប់ទៅ App Client វិញ (មានកញ្ចប់ output ត្រឹមត្រូវតាមទម្រង់ RunPod)
         return {
             "output": {
                 "audio_base64": out_b64,
@@ -199,5 +194,10 @@ def handler(job):
     except Exception as e:
         return {"error": str(e)}
 
-# --- បើកដំណើរការប្រព័ន្ធរង់ចាំទទួលការងារពី RunPod ---
-runpod.serverless.start({"handler": handler, "init": init})
+# -------------------------------------------------------------
+# 🔥 គន្លឹះដោះស្រាយ៖ បង្ខំឱ្យរត់មុខងារ Load Model ភ្លាមៗពេលកូដចាប់ផ្តើម
+# -------------------------------------------------------------
+initialize_model()
+
+# ចាប់ផ្តើមស្តាប់ការងារពី RunPod (ដាក់តែ handler មួយបានហើយ)
+runpod.serverless.start({"handler": handler})
