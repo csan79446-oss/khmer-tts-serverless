@@ -1,133 +1,203 @@
 import os
-import runpod
-import torch
-import base64
+import re
 import io
-import soundfile as sf
-import logging
+import base64
+import tempfile
 import numpy as np
-from huggingface_hub import hf_hub_download
+import soundfile as sf
+import runpod  # <--- ត្រូវតែដំឡើង និងប្រើប្រាស់សម្រាប់ RunPod Serverless
+from pydantic import BaseModel
+from typing import Optional
+from voxcpm import VoxCPM
 
-# សន្មតថាកញ្ចប់ voxcpm ត្រូវបានដំឡើងតាមរយៈ requirements.txt រួចរាល់
-from voxcpm import VoxCPM 
-
-os.environ["TORCH_COMPILE"] = "0"
-torch._dynamo.config.suppress_errors = True
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# បង្កើតប្រថាប់ (Global Variable) ទុកសម្រាប់ផ្ទុកម៉ូដែល
 model = None
+SAMPLE_RATE = 24000
+init_error = None
 
-# Voice Design Mapping សម្រាប់សំឡេងនីមួយៗ (យោងតាមទម្រង់ការងារ VoxCPM2)
-PRESET_MAPPING = {
-    "[ប្រុស១]": "(A mature Cambodian man, clear, calm and professional voice)",
-    "[ស្រី១]": "(A young Cambodian woman, gentle, sweet and clear voice)",
-    "[ប្រុស២]": "(A young Cambodian man, energetic and clear voice)",
-    "[ស្រី២]": "(A mature Cambodian woman, professional and confident voice)",
-    "[ប្រុស៣]": "(A deep-voiced Cambodian man, formal and serious tone)",
-    "[ស្រី៣]": "(A warm and friendly Cambodian woman's voice)"
+NUMBERS_MAP = {
+    '0': 'សូន្យ', '1': 'មួយ', '2': 'ពីរ', '3': 'បី', '4': 'បួន',
+    '5': 'ប្រាំ', '6': 'ប្រាំមួយ', '7': 'ប្រាំពីរ', '8': 'ប្រាំបី', '9': 'ប្រាំបួន',
+    '០': 'សូន្យ', '១': 'មួយ', '២': 'ពីរ', '៣': 'បី', '៤': 'បួន',
+    '៥': 'ប្រាំ', '៦': 'ប្រាំមួយ', '៧': 'ប្រាំពីរ', '៨': 'ប្រាំបី', '៩': 'ប្រាំបួន'
 }
 
-def init():
-    global model
-    logger.info("⚡ កំពុងផ្ទុកម៉ូដែល AI (VoxCPM) ទៅកាន់ GPU...")
-    try:
-        # ប្តូរ "openbmb/VoxCPM2" ទៅជា Repo ID ឬ Path ពិតប្រាកដរបស់ម៉ូដែលអ្នក
-        model = VoxCPM.from_pretrained("openbmb/VoxCPM2") 
-        model.to("cuda")
-        logger.info("✅ ម៉ូដែល AI បានផ្ទុកនិងរៀបចំរួចរាល់នៅលើ CUDA (GPU)!")
-    except Exception as e:
-        logger.error(f"❌ បរាជ័យក្នុងការផ្ទុកម៉ូដែល: {str(e)}")
-        raise e
+def clean_khmer_text(raw_text: str) -> str:
+    text = raw_text
+    for digit, word in NUMBERS_MAP.items():
+        text = text.replace(digit, word)
+    text = re.sub(r'[^\u1780-\u17F9\sAlign។ៗ?!,a-zA-Z]', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
 
+def srt_time_to_seconds(time_str: str) -> float:
+    try:
+        parts = time_str.replace(',', '.').split(':')
+        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+    except Exception:
+        return 0.0
+
+class SpeakerConfig(BaseModel):
+    mode: str = "preset"
+    preset_name: Optional[str] = "[ប្រុស១]"
+    ref_audio_base64: Optional[str] = None
+
+# --- មុខងាររត់ដំបូងពេលបើកម៉ាស៊ីន (Init Function) ---
+def init():
+    global model, SAMPLE_RATE, init_error
+    print("⚙️ កំពុងផ្ទុកម៉ូដែល VoxCPM2 ទៅកាន់ GPU...")
+    try:
+        # Load model ចូលទៅកាន់ CUDA (GPU)
+        model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
+        if hasattr(model, 'to'):
+            model.to("cuda")
+        SAMPLE_RATE = model.tts_model.sample_rate 
+        print(f"✅ ម៉ូដែលរួចរាល់! {SAMPLE_RATE}Hz")
+    except Exception as e:
+        init_error = str(e)
+        print(f"❌ បរាជ័យក្នុងការផ្ទុកម៉ូដែល: {init_error}")
+
+def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_path: str) -> np.ndarray:
+    kwargs = {
+        "text": text_chunk,
+        "cfg_value": 2.5,
+        "inference_timesteps": 25,
+        "normalize": True,
+        "retry_badcase": True
+    }
+    
+    # ជ្រើសរើសផ្លូវឯកសារសំឡេងគំរូ
+    ref_path = temp_ref_path if (temp_ref_path and os.path.exists(temp_ref_path)) else fallback_ref_path
+    
+    if ref_path and os.path.exists(ref_path):
+        # ការពារការខុសជំនាន់កញ្ចប់បណ្ណាល័យ (VoxCPM ខ្លះប្រើ reference_audio ខ្លះប្រើ reference_wav_path)
+        kwargs["reference_audio"] = ref_path 
+        kwargs["reference_wav_path"] = ref_path 
+    
+    try:
+        return model.generate(**kwargs)
+    except Exception as gen_err:
+        print(f"❌ កំហុសពេល Model កំពុងដំណើរការ៖ {str(gen_err)}")
+        return np.array([], dtype=np.float32)
+
+def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
+    clean_txt = clean_khmer_text(text)
+    if not clean_txt or len(clean_txt.strip()) == 0:
+        return np.array([], dtype=np.float32)
+    
+    temp_ref_path = None
+    fallback_ref_path = None
+    
+    if config.mode == "clone" and config.ref_audio_base64 and len(config.ref_audio_base64.strip()) > 100:
+        try:
+            b64_str = config.ref_audio_base64.split(",")[1] if "," in config.ref_audio_base64 else config.ref_audio_base64
+            audio_data, orig_sr = sf.read(io.BytesIO(base64.b64decode(b64_str)))
+            if len(audio_data.shape) > 1: audio_data = np.mean(audio_data, axis=1)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                sf.write(tmp.name, audio_data, orig_sr)
+                temp_ref_path = tmp.name
+        except Exception as e: 
+            print(f"⚠️ Clone error: {e}")
+
+    if not temp_ref_path:
+        voice_name = re.sub(r'[\[\]]', '', config.preset_name or "ប្រុស១")
+        preset_file = f"{voice_name}.wav"
+        if os.path.exists(preset_file): 
+            fallback_ref_path = preset_file
+        else:
+            fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
+            if fallback_files: fallback_ref_path = fallback_files[0]
+
+    chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
+    sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
+    
+    master_audio_chunks = []
+    silence_array = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
+
+    for i, sentence in enumerate(sentences):
+        seg_wav = _generate_single_audio(sentence, temp_ref_path, fallback_ref_path)
+        if len(seg_wav) > 0:
+            master_audio_chunks.append(seg_wav)
+            if i < len(sentences) - 1: 
+                master_audio_chunks.append(silence_array)
+
+    if temp_ref_path and os.path.exists(temp_ref_path): 
+        os.remove(temp_ref_path)
+        
+    return np.concatenate(master_audio_chunks) if master_audio_chunks else np.array([], dtype=np.float32)
+
+# --- មុខងារចម្បងដែលរត់រាល់ពេលមាន Request (Handler) ---
 def handler(job):
-    job_input = job.get("input", {})
-    text = job_input.get("text", "").strip()
-    mode = job_input.get("mode", "preset")
-    preset_name = job_input.get("preset_name", "[ប្រុស១]")
-    ref_audio_name = job_input.get("ref_audio_name", "")
-    speaker_map = job_input.get("speaker_map", {})
+    global model, init_error
+    
+    # បញ្ឈប់ភ្លាមបើផ្ទុកម៉ូដែលមិនចូល GPU
+    if model is None:
+        return {"error": f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុ៖ {init_error}"}
+
+    input_data = job.get("input", {})
+    text = input_data.get("text", "")
+    mode = input_data.get("mode", "preset")
+    preset_name = input_data.get("preset_name", "[ប្រុស១]")
+    ref_audio_base64 = input_data.get("ref_audio_base64", None)
     
     if not text:
         return {"error": "សូមបញ្ចូលអត្ថបទអក្សរ!"}
-        
+
     try:
-        logger.info(f"🎙️ កំពុងផលិតសំឡេង... Mode: {mode} | អត្ថបទ: {text[:30]}...")
-
-        # --- ទម្រង់ទី ១: Mode Preset (Voice Design) ---
-        if mode == "preset":
-            description = PRESET_MAPPING.get(preset_name, "(A clear Cambodian voice)")
-            full_text = f"{description}{text}"
-            wav = model.generate(full_text)
-
-        # --- ទម្រង់ទី ២: Mode Clone (Zero-Shot Voice Cloning) ---
-        elif mode == "clone":
-            if not ref_audio_name:
-                return {"error": "មិនមានឈ្មោះឯកសារសំឡេងគំរូឡើយ!"}
-            # ទាញយកឯកសារសំឡេងគំរូពី Hugging Face មកទុកនៅលើ Server ជាបណ្តោះអាសន្ន
-            local_ref_path = hf_hub_download(repo_id="Tha456/VoxCPM2", filename=ref_audio_name, repo_type="model")
-            wav = model.generate(text=text, reference_audio=local_ref_path)
-
-        # --- ទម្រង់ទី ៣: Mode SRT (បំបែកសំឡេងតាម Tag) ---
-        elif mode == "srt":
-            lines = text.split('\n')
-            combined_wavs = []
-            
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                    
-                current_tag = None
-                for tag in PRESET_MAPPING.keys():
-                    if line.startswith(tag):
-                        current_tag = tag
-                        break
-                        
-                if current_tag:
-                    line_text = line[len(current_tag):].strip()
-                    speaker_info = speaker_map.get(current_tag, {"mode": "preset", "preset_name": current_tag})
-                else:
-                    line_text = line
-                    speaker_info = {"mode": "preset", "preset_name": "[ប្រុស១]"}
-                    
-                if not line_text:
-                    continue
-                    
-                if speaker_info.get("mode") == "clone":
-                    r_name = speaker_info.get("ref_audio_name")
-                    local_ref_path = hf_hub_download(repo_id="Tha456/VoxCPM2", filename=r_name, repo_type="model")
-                    line_wav = model.generate(text=line_text, reference_audio=local_ref_path)
-                else:
-                    p_name = speaker_info.get("preset_name", "[ប្រុស១]")
-                    desc = PRESET_MAPPING.get(p_name, "(A clear voice)")
-                    full_line_text = f"{desc}{line_text}"
-                    line_wav = model.generate(full_line_text)
-                    
-                combined_wavs.append(line_wav)
+        if mode == "srt":
+            blocks = re.split(r'\n\s*\n', text.strip())
+            master_audio = []
+            last_end_time = 0.0
+            for block in blocks:
+                lines = [l.strip() for l in block.split('\n') if l.strip()]
+                if len(lines) < 3: continue
+                time_match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
+                if not time_match: continue
+                start_sec = srt_time_to_seconds(time_match.group(1))
+                content_line = " ".join(lines[2:])
+                tag_match = re.match(r'^(\[.*?\])\s*(.*)', content_line)
+                speaker_tag = tag_match.group(1) if tag_match else "default"
+                speech_text = tag_match.group(2) if tag_match else content_line
                 
-            if combined_wavs:
-                wav = np.concatenate(combined_wavs, axis=0)
+                if start_sec > last_end_time:
+                    master_audio.append(np.zeros(int((start_sec - last_end_time) * SAMPLE_RATE), dtype=np.float32))
+                
+                cfg = SpeakerConfig(mode="preset", preset_name=speaker_tag)
+                seg_wav = generate_segment(speech_text, cfg)
+                if len(seg_wav) > 0:
+                    master_audio.append(seg_wav)
+                    last_end_time = start_sec + (len(seg_wav) / SAMPLE_RATE)
+            
+            if master_audio:
+                final_wav = np.concatenate(master_audio)
             else:
-                return {"error": "រកមិនឃើញអត្ថបទដែលមានទម្រង់ Tag ត្រឹមត្រូវទេ!"}
+                return {"error": "រកមិនឃើញឃ្លាដែលមានទម្រង់ SRT ត្រឹមត្រូវទេ"}
         else:
-            return {"error": f"មិនស្គាល់ Mode: {mode}"}
+            cfg = SpeakerConfig(mode=mode, preset_name=preset_name, ref_audio_base64=ref_audio_base64)
+            final_wav = generate_segment(text, cfg)
 
-        # --- បំប្លែង Audio Array ទៅជា Base64 ទម្រង់ WAV ---
-        bytes_io = io.BytesIO()
-        sample_rate = 24000  # កម្រិត Sample Rate លំនាំដើមរបស់ VoxCPM
-        sf.write(bytes_io, wav, sample_rate, format='WAV')
-        audio_base64 = base64.b64encode(bytes_io.getvalue()).decode('utf-8')
+        if len(final_wav) == 0: 
+            return {"error": "ដំណើរការបរាជ័យ មិនអាចបង្កើតសំឡេងបានឡើយ"}
         
-        logger.info("✅ ការផលិតសំឡេងជោគជ័យ ១០០%!")
+        # Normalize សំឡេង
+        max_amp = np.max(np.abs(final_wav))
+        if max_amp > 0: 
+            final_wav = final_wav / max_amp
+        
+        # បំប្លែង Audio ទៅជា Base64
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            sf.write(tmp.name, final_wav, SAMPLE_RATE)
+            out_b64 = base64.b64encode(open(tmp.name, 'rb').read()).decode('utf-8')
+            os.remove(tmp.name)
+        
+        # បោះលទ្ធផលត្រឡប់ទៅ App Client វិញ (មានកញ្ចប់ output ត្រឹមត្រូវតាមទម្រង់ RunPod)
         return {
             "output": {
-                "audio_base64": audio_base64,
+                "audio_base64": out_b64,
                 "status": "success"
             }
         }
     except Exception as e:
-        logger.error(f"❌ Error: {str(e)}")
         return {"error": str(e)}
 
+# --- បើកដំណើរការប្រព័ន្ធរង់ចាំទទួលការងារពី RunPod ---
 runpod.serverless.start({"handler": handler, "init": init})
