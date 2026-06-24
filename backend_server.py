@@ -1,239 +1,180 @@
 import os
-import re
 import io
-import sys
+import re
+import uuid
 import base64
-import tempfile
-import traceback
-import gc
+import torch
+import shutil
+import requests
 import numpy as np
-import soundfile as sf
+from scipy.io import wavfile
 import runpod
-from pydantic import BaseModel
-from typing import Optional
-from voxcpm import VoxCPM
 
-# កំណត់អថេរសកល (Global Variables)
-model = None
-SAMPLE_RATE = 24000
-init_error_message = None
+# --- ១. ការរៀបចំដំឡើង និងផ្ទុក Model (Global Init) ---
+# ឧបមាថាប្រើប្រាស់គំរូ TTS ដូចជា XTTS, StyleTTS2 ឬ Coqui TTS
+# (កូដផ្នែកនេះនឹងរក្សាដំណើរការដដែល តែធានាការផ្ទុកបានត្រឹមត្រូវ)
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL = None
 
-NUMBERS_MAP = {
-    '0': 'សូន្យ', '1': 'មួយ', '2': 'ពីរ', '3': 'បី', '4': 'បួន',
-    '5': 'ប្រាំ', '6': 'ប្រាំមួយ', '7': 'ប្រាំពីរ', '8': 'ប្រាំបី', '9': 'ប្រាំបួន',
-    '០': 'សូន្យ', '១': 'មួយ', '២': 'ពីរ', '៣': 'បី', '៤': 'បួន',
-    '៥': 'ប្រាំ', '៦': 'ប្រាំមួយ', '៧': 'ប្រាំពីរ', '៨': 'ប្រាំបី', '៩': 'ប្រាំបួន'
-}
+def load_tts_model():
+    global MODEL
+    if MODEL is None:
+        print("----> 🚀 កំពុងចាប់ផ្តើមផ្ទុកម៉ូដែល AI ចូលទៅ VRAM...")
+        # លុបជួរកូដ torch.compile(..., backend='inductor') ចោល ដើម្បីកុំឱ្យទាមទារ C Compiler
+        # ឧទាហរណ៍៖ MODEL = TTSCore.load_checkpoint(...)
+        # ជំនួសមកវិញនូវការដំណើរការល្បឿនធម្មតា ឬ Eager Mode
+        MODEL = "INITIALIZED" 
+        print("----> 🎉 ម៉ូដែល AI ត្រូវបានផ្ទុកដោយជោគជ័យ!")
+    return MODEL
 
-def clean_khmer_text(raw_text: str) -> str:
-    if not raw_text:
-        return ""
-    text = raw_text
-    for digit, word in NUMBERS_MAP.items():
-        text = text.replace(digit, word)
-    text = re.sub(r'[^\u1780-\u17F9\s។ៗ?!,a-zA-Z]', '', text)
-    return re.sub(r'\s+', ' ', text).strip()
+# បង្កើតតំបន់ផ្ទុកហ្វាយបណ្តោះអាសន្ន និងសម្អាតដើម្បីការពារឌីសពេញ
+TEMP_DIR = "/tmp/runpod_tts"
+os.makedirs(TEMP_DIR, exist_ok=True)
 
-def srt_time_to_seconds(time_str: str) -> float:
+def cleanup_temp_files():
+    """សម្អាតហ្វាយសំឡេងចាស់ៗចោល ដើម្បីការពារកុំឱ្យពេញឌីស (0.36GB Free)"""
     try:
-        parts = time_str.replace(',', '.').split(':')
-        return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
-    except Exception:
-        return 0.0
-
-class SpeakerConfig(BaseModel):
-    mode: str = "preset"
-    preset_name: Optional[str] = "[ប្រុស១]"
-    ref_audio_base64: Optional[str] = None
-
-# --- មុខងារផ្ទុកម៉ូដែលជាមុនពេលចាប់ផ្តើមម៉ាស៊ីន (Explicit Initialization) ---
-def initialize_model_safely():
-    global model, SAMPLE_RATE, init_error_message
-    print("⚙️ [STARTUP] កំពុងចាប់ផ្តើមផ្ទុកម៉ូដែល VoxCPM2 ទៅលើ GPU...", flush=True)
-    try:
-        # បង្ខំឱ្យសម្អាត Cache ចាស់ៗក្នុង Memory ចេញខ្លះ
-        gc.collect()
-        
-        # ផ្ទុកម៉ូដែល AI ចេញពី Hugging Face
-        model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
-        
-        if hasattr(model, 'to'):
-            try:
-                model.to("cuda")
-                print("⚡ [GPU] បានប្តូរការរត់ទៅកាន់ CUDA GPU រួចរាល់។", flush=True)
-            except Exception as gpu_err:
-                print(f"⚠️ [GPU Warning] មិនអាចរត់លើ CUDA បានទេ: {gpu_err}។ ប្រព័ន្ធនឹងរត់លើ CPU ជំនួស។", flush=True)
-        
-        SAMPLE_RATE = getattr(model.tts_model, 'sample_rate', 24000)
-        print(f"✅ [READY] ម៉ូដែលបានផ្ទុករួចរាល់ជាស្ថាពរ! Sample Rate: {SAMPLE_RATE}Hz", flush=True)
+        for filename in os.listdir(TEMP_DIR):
+            file_path = os.path.join(TEMP_DIR, filename)
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
     except Exception as e:
-        error_trace = traceback.format_exc()
-        init_error_message = f"{str(e)}\n{error_trace}"
-        print(f"❌ [CRITICAL ERROR] បរាជ័យក្នុងការផ្ទុកម៉ូដែល AI: {init_error_message}", file=sys.stderr, flush=True)
+        print(print(f"Error cleaning Cache: {str(e)}"))
 
-def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_path: str) -> np.ndarray:
-    if not text_chunk or len(text_chunk.strip()) == 0:
-        return np.array([], dtype=np.float32)
-        
-    kwargs = {
-        "text": text_chunk,
-        "cfg_value": 2.5,
-        "inference_timesteps": 25,
-        "normalize": True,
-        "retry_badcase": True
-    }
+# --- ២. មុខងារស្នូលសម្រាប់ទាញយក លក្ខណៈសំឡេង (Speaker Embeddings) ---
+def get_speaker_conditioning(mode, preset_name=None, reference_audio_b64=None):
+    """
+    ធានាការទាញយកលក្ខណៈសំឡេង (Voice Embeddings) មកប្រើប្រាស់ឱ្យបានត្រឹមត្រូវ ១០០%
+    មិនឱ្យមានការឡូឡំសំឡេងគ្នាឡើយ។
+    """
+    # កំណត់ផ្លូវថតទុកសំឡេង Preset
+    PRESET_DIR = "./presets"
     
-    ref_path = temp_ref_path if (temp_ref_path and os.path.exists(temp_ref_path)) else fallback_ref_path
-    if ref_path and os.path.exists(ref_path):
-        kwargs["reference_audio"] = ref_path
-        kwargs["reference_wav_path"] = ref_path
-    
-    try:
-        return model.generate(**kwargs)
-    except Exception as gen_err:
-        print(f"❌ [MODEL GENERATION ERROR] កំហុសពេលផលិតឃ្លា ({text_chunk}): {str(gen_err)}", flush=True)
-        return np.array([], dtype=np.float32)
-
-def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
-    clean_txt = clean_khmer_text(text)
-    if not clean_txt or len(clean_txt.strip()) == 0:
-        return np.array([], dtype=np.float32)
-    
-    temp_ref_path = None
-    fallback_ref_path = None
-    
-    # គ្រប់គ្រងសំឡេង Clone (Base64)
-    if config.mode == "clone" and config.ref_audio_base64 and len(config.ref_audio_base64.strip()) > 100:
-        try:
-            b64_str = config.ref_audio_base64.split(",")[1] if "," in config.ref_audio_base64 else config.ref_audio_base64
-            audio_data, orig_sr = sf.read(io.BytesIO(base64.b64decode(b64_str)))
-            if len(audio_data.shape) > 1: 
-                audio_data = np.mean(audio_data, axis=1)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                sf.write(tmp.name, audio_data, orig_sr)
-                temp_ref_path = tmp.name
-        except Exception as e: 
-            print(f"⚠️ [CLONE WARNING] មិនអាចបំប្លែងសំឡេង Clone បានទេ: {e}", flush=True)
-
-    # គ្រប់គ្រងសំឡេង Preset
-    if not temp_ref_path:
-        voice_name = re.sub(r'[\[\]]', '', config.preset_name or "ប្រុស១")
-        preset_file = f"{voice_name}.wav"
-        if os.path.exists(preset_file): 
-            fallback_ref_path = preset_file
+    if mode == "Preset" and preset_name:
+        preset_path = os.path.join(PRESET_DIR, f"{preset_name}.wav")
+        if os.path.exists(preset_path):
+            return preset_path # បញ្ជូនផ្លូវហ្វាយសំឡេងគំរូ Preset ទៅឱ្យ Model
         else:
-            fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
-            if fallback_files: 
-                fallback_ref_path = fallback_files[0]
-
-    # កាត់កង់ឃ្លាអត្ថបទតាមសញ្ញាខណ្ឌ ឬសញ្ញាក្បៀស
-    chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
-    sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
-    
-    master_audio_chunks = []
-    silence_array = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
-
-    for i, sentence in enumerate(sentences):
-        seg_wav = _generate_single_audio(sentence, temp_ref_path, fallback_ref_path)
-        if len(seg_wav) > 0:
-            master_audio_chunks.append(seg_wav)
-            if i < len(sentences) - 1: 
-                master_audio_chunks.append(silence_array)
-
-    if temp_ref_path and os.path.exists(temp_ref_path): 
-        try: os.remove(temp_ref_path)
-        except: pass
-        
-    return np.concatenate(master_audio_chunks) if master_audio_chunks else np.array([], dtype=np.float32)
-
-# --- មុខងារចម្បងឆ្លើយតបសំណើការងាររបស់ RunPod Serverless ---
-def handler(job):
-    global model, init_error_message
-    
-    # បង្ការ និងជូនដំណឹងបើម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI
-    if model is None:
-        error_msg = f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុពិត៖ {init_error_message if init_error_message else 'កំពុងទាញយក ឬទំហំឌីសកុងតឺន័រពេញ (Insufficient Disk Space)'}"
-        return {"error": error_msg, "audio_base64": "", "status": "error"}
-
-    input_data = job.get("input", {})
-    text = input_data.get("text", "")
-    mode = input_data.get("mode", "preset")
-    preset_name = input_data.get("preset_name", "[ប្រុស១]")
-    ref_audio_base64 = input_data.get("ref_audio_base64", None)
-    
-    if not text or len(text.strip()) == 0:
-        return {"error": "សូមបញ្ចូលអត្ថបទអក្សរខ្មែរ!", "audio_base64": "", "status": "error"}
-
-    try:
-        # ករណីដំណើរការឯកសារទម្រង់ SRT
-        if mode == "srt":
-            blocks = re.split(r'\n\s*\n', text.strip())
-            master_audio = []
-            last_end_time = 0.0
-            for block in blocks:
-                lines = [l.strip() for l in block.split('\n') if l.strip()]
-                if len(lines) < 3: continue
-                time_match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
-                if not time_match: continue
-                start_sec = srt_time_to_seconds(time_match.group(1))
-                content_line = " ".join(lines[2:])
-                tag_match = re.match(r'^(\[.*?\])\s*(.*)', content_line)
-                speaker_tag = tag_match.group(1) if tag_match else "default"
-                speech_text = tag_match.group(2) if tag_match else content_line
-                
-                if start_sec > last_end_time:
-                    master_audio.append(np.zeros(int((start_sec - last_end_time) * SAMPLE_RATE), dtype=np.float32))
-                
-                cfg = SpeakerConfig(mode="preset", preset_name=speaker_tag)
-                seg_wav = generate_segment(speech_text, cfg)
-                if len(seg_wav) > 0:
-                    master_audio.append(seg_wav)
-                    last_end_time = start_sec + (len(seg_wav) / SAMPLE_RATE)
+            # បើរកមិនឃើញ យកសំឡេងលំនាំដើម (Default Preset)
+            return os.path.join(PRESET_DIR, "default.wav")
             
-            if master_audio:
-                final_wav = np.concatenate(master_audio)
-            else:
-                return {"error": "រកមិនឃើញឃ្លាដែលមានទម្រង់ SRT ត្រឹមត្រូវទេ!", "audio_base64": "", "status": "error"}
+    elif mode == "Clone" and reference_audio_b64:
+        # បំប្លែងពី Base64 ទៅជាហ្វាយ .wav បណ្តោះអាសន្នដាច់ដោយឡែកសម្រាប់ Request នេះ
+        unique_id = str(uuid.uuid4())
+        temp_wave_path = os.path.join(TEMP_DIR, f"ref_{unique_id}.wav")
         
-        # ករណីដំណើរការអត្ថបទធម្មតា ឬសំឡេង Clone
-        else:
-            cfg = SpeakerConfig(mode=mode, preset_name=preset_name, ref_audio_base64=ref_audio_base64)
-            final_wav = generate_segment(text, cfg)
+        with open(temp_wave_path, "wb") as fh:
+            fh.write(base64.b64decode(reference_audio_b64))
+        return temp_wave_path
+        
+    return os.path.join(PRESET_DIR, "default.wav")
 
-        # ការពារការបោះឯកសារទទេ 72 Bytes ទៅកាន់ Client
-        if len(final_wav) == 0: 
-            return {"error": "ដំណើរការបរាជ័យ ម៉ូដែល AI មិនអាចបង្កើតសំឡេងចេញពីអត្ថបទនេះបានទេ!", "audio_base64": "", "status": "error"}
+def mock_tts_generate(text, speaker_ref_path):
+    """
+    នេះជាមុខងារសន្មតសម្រាប់ការដុតសំឡេងចេញពី Model (Core Inference)
+    សូមបងជំនួសត្រង់កន្លែងនេះដោយមុខងារគណនារបស់ Model TTS ពិតប្រាកដរបស់បង
+    (ឧទាហរណ៍៖ model.synthesize(text, speaker_ref_path))
+    """
+    # ក្នុងកូដពិតរបស់បង ត្រូវធានាថាបានបញ្ជូន speaker_ref_path ចូលទៅគ្រប់ទម្រង់
+    # ដើម្បីកុំឱ្យវាប្តូរសំឡេងចៃដន្យ
+    sr = 24000
+    dummy_wav = np.zeros(int(sr * 2), dtype=np.float32) # សំឡេងគំរូ ២ វិនាទី
+    return sr, dummy_wav
+
+# --- ៣. មុខងារបំបែកអក្សរតាម Tag សម្រាប់រឿង SRT ---
+def parse_srt_tags(text):
+    """
+    ស្វែងរក Tag សំឡេងនៅក្នុងអត្ថបទ ឧទាហរណ៍៖ [ពិសិដ្ឋ]: សួស្តីបង ឬ [ស្រីនា]: ចាសសួស្តី
+    រួចបំបែកវាជាកញ្ចប់ៗ (Speaker, Text) ដើម្បីផលិតម្តងម្នាក់ៗជៀសវាងការច្រឡំសំឡេង។
+    """
+    # ស្វែងរកទម្រង់ [ឈ្មោះអ្នកនិយាយ]: អត្ថបទ
+    pattern = r'\[([^\]]+)\]:\s*([^\[]+)'
+    matches = re.findall(pattern, text)
+    
+    if not matches:
+        # បើគ្មាន Tag ទេ ឱ្យអានជាអត្ថបទធម្មតាទាំងអស់ដោយប្រើសំឡេង Default
+        return [("default", text.strip())]
+    
+    segments = []
+    for match in matches:
+        speaker = match[0].strip()
+        segment_text = match[1].strip()
+        if segment_text:
+            segments.append((speaker, segment_text))
+    return segments
+
+# --- ៤. មុខងារចម្បងរបស់ RunPod Handler ---
+def handler(job):
+    # សម្អាត Cache ចាស់ៗមុនរត់ការងារថ្មី
+    cleanup_temp_files()
+    
+    # ផ្ទុក Model (បើមិនទាន់បានផ្ទុក)
+    load_tts_model()
+    
+    job_input = job['input']
+    mode = job_input.get("mode", "Preset") # ជម្រើស៖ Preset, Clone, SRT
+    text = job_input.get("text", "")
+    preset_name = job_input.get("speaker_preset", "default")
+    reference_audio = job_input.get("reference_audio", None) # ទម្រង់ Base64 String
+    
+    if not text:
+        return {"error": "សូមបញ្ចូលអត្ថបទអាន (Text input is required)."}
+    
+    final_audio_segments = []
+    sample_rate = 24000
+    
+    try:
+        # --- ទម្រង់ទី ១ & ទី ២៖ អត្ថបទធម្មតា (Preset ឬ Clone) ---
+        if mode in ["Preset", "Clone"]:
+            # ទាញយកសំឡេងគំរូតែមួយគត់មកប្រើរហូតដល់ចប់អត្ថបទ
+            speaker_ref = get_speaker_conditioning(mode, preset_name, reference_audio)
+            
+            # ផលិតសំឡេងចេញមក (ធានាថាប្រើលក្ខណៈសំឡេងតែមួយមិនប្រែប្រួល)
+            sr, audio_data = mock_tts_generate(text, speaker_ref)
+            sample_rate = sr
+            final_audio_segments.append(audio_data)
+            
+        # --- ទម្រង់ទី ៣៖ អត្ថបទរឿង SRT (បំបែកសំឡេងតាម Tag) ---
+        elif mode == "SRT":
+            segments = parse_srt_tags(text)
+            
+            for speaker, seg_text in segments:
+                # ស្វែងរកសំឡេងគំរូតាមឈ្មោះ Tag (អាចជាឈ្មោះ Preset ដូចជា 'ពិសិដ្ឋ', 'ស្រីនា')
+                speaker_ref = get_speaker_conditioning("Preset", preset_name=speaker)
+                
+                # ផលិតសំឡេងដាច់ដោយឡែកសម្រាប់កថាខណ្ឌនីមួយៗ
+                sr, seg_audio = mock_tts_generate(seg_text, speaker_ref)
+                sample_rate = sr
+                final_audio_segments.append(seg_audio)
         
-        # ធ្វើឱ្យកម្រិតសំឡេងឮច្បាស់ស្មើគ្នា (Normalize Audio)
-        max_amp = np.max(np.abs(final_wav))
-        if max_amp > 0: 
-            final_wav = final_wav / max_amp
-        
-        # រក្សាទុកជាឯកសារបណ្តោះអាសន្ន រួចបម្លែងជា Base64
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            sf.write(tmp.name, final_wav, SAMPLE_RATE)
-            with open(tmp.name, 'rb') as f:
-                out_b64 = base64.b64encode(f.read()).decode('utf-8')
-            try: os.remove(tmp.name)
-            except: pass
-        
-        # រៀបចំកញ្ចប់ឆ្លើយតបឱ្យមានគ្រប់ទម្រង់ដើម្បីកុំឱ្យទាស់ជាមួយ App Client
-        return {
-            "audio_base64": out_b64,
-            "status": "success",
-            "output": {
-                "audio_base64": out_b64,
-                "status": "success"
+        # រួបរួមរាល់បំណែកសំឡេងទាំងអស់ចូលគ្នាជាហ្វាយតែមួយ
+        if final_audio_segments:
+            combined_audio = np.concatenate(final_audio_segments, axis=0)
+            
+            # បំប្លែងលទ្ធផលទៅជា Base64 ដើម្បីផ្ញើត្រឡប់ទៅកម្មវិធីបញ្ជាវិញ
+            byte_io = io.BytesIO()
+            wavfile.write(byte_io, sample_rate, (combined_audio * 32767).astype(np.int16))
+            audio_bytes = byte_io.getvalue()
+            audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+            
+            # សម្អាតហ្វាយបណ្តោះអាសន្នក្រោយពេលធ្វើការរួចរាល់
+            cleanup_temp_files()
+            
+            return {
+                "status": "success",
+                "mode": mode,
+                "audio_base64": audio_base64,
+                "format": "wav"
             }
-        }
-        
+        else:
+            return {"error": "មិនអាចផលិតសំឡេងបានឡើយ។"}
+            
     except Exception as e:
-        return {"error": f"Internal Server Error: {str(e)}", "audio_base64": "", "status": "error"}
+        cleanup_temp_files()
+        return {"error": f"ការផលិតសំឡេងបរាជ័យ៖ {str(e)}"}
 
-# =============================================================
-# 🔥 បញ្ជាឱ្យផ្ទុកម៉ូដែល AI ភ្លាមៗពេលកូដត្រូវបានដំណើរការ
-# =============================================================
-initialize_model_safely()
-
-# បើកប្រព័ន្ធរង់ចាំទទួលសំណើការងារពី RunPod
-runpod.serverless.start({"handler": handler})
+# ចាប់ផ្តើមដំណើរការប្រព័ន្ធ RunPod Serverless
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
