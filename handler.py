@@ -5,6 +5,7 @@ import sys
 import base64
 import tempfile
 import traceback
+import gc
 import numpy as np
 import soundfile as sf
 import runpod
@@ -12,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional
 from voxcpm import VoxCPM
 
-# កំណត់អថេរ Global សម្រាប់ប្រព័ន្ធ
+# កំណត់អថេរសកល (Global Variables)
 model = None
 SAMPLE_RATE = 24000
 init_error_message = None
@@ -45,28 +46,30 @@ class SpeakerConfig(BaseModel):
     preset_name: Optional[str] = "[ប្រុស១]"
     ref_audio_base64: Optional[str] = None
 
-# --- មុខងារផ្ទុកម៉ូដែលជាមុន (Pre-loading Model) ---
+# --- មុខងារផ្ទុកម៉ូដែលជាមុនពេលចាប់ផ្តើមម៉ាស៊ីន (Explicit Initialization) ---
 def initialize_model_safely():
     global model, SAMPLE_RATE, init_error_message
     print("⚙️ [STARTUP] កំពុងចាប់ផ្តើមផ្ទុកម៉ូដែល VoxCPM2 ទៅលើ GPU...", flush=True)
     try:
-        # ផ្ទុកម៉ូដែល AI
+        # បង្ខំឱ្យសម្អាត Cache ចាស់ៗក្នុង Memory ចេញខ្លះ
+        gc.collect()
+        
+        # ផ្ទុកម៉ូដែល AI ចេញពី Hugging Face
         model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
         
-        # បញ្ជូនទៅកាន់ CUDA (GPU) ប្រសិនបើមានទម្រង់ .to()
         if hasattr(model, 'to'):
             try:
                 model.to("cuda")
-                print("⚡ [GPU] បានប្តូរការរត់ទៅកាន់ CUDA ដោយជោគជ័យ។", flush=True)
+                print("⚡ [GPU] បានប្តូរការរត់ទៅកាន់ CUDA GPU រួចរាល់។", flush=True)
             except Exception as gpu_err:
                 print(f"⚠️ [GPU Warning] មិនអាចរត់លើ CUDA បានទេ: {gpu_err}។ ប្រព័ន្ធនឹងរត់លើ CPU ជំនួស។", flush=True)
         
         SAMPLE_RATE = getattr(model.tts_model, 'sample_rate', 24000)
-        print(f"✅ [READY] ម៉ូដែលបានផ្ទុករួចរាល់! Sample Rate: {SAMPLE_RATE}Hz", flush=True)
+        print(f"✅ [READY] ម៉ូដែលបានផ្ទុករួចរាល់ជាស្ថាពរ! Sample Rate: {SAMPLE_RATE}Hz", flush=True)
     except Exception as e:
         error_trace = traceback.format_exc()
         init_error_message = f"{str(e)}\n{error_trace}"
-        print(f"❌ [CRITICAL ERROR] បរាជ័យក្នុងការផ្ទុកម៉ូដែល AI: {init_error_message}", sys.stderr, flush=True)
+        print(f"❌ [CRITICAL ERROR] បរាជ័យក្នុងការផ្ទុកម៉ូដែល AI: {init_error_message}", file=sys.stderr, flush=True)
 
 def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_path: str) -> np.ndarray:
     if not text_chunk or len(text_chunk.strip()) == 0:
@@ -82,14 +85,13 @@ def _generate_single_audio(text_chunk: str, temp_ref_path: str, fallback_ref_pat
     
     ref_path = temp_ref_path if (temp_ref_path and os.path.exists(temp_ref_path)) else fallback_ref_path
     if ref_path and os.path.exists(ref_path):
-        # ការពារការខុសជំនាន់កូដ ( VoxCPM ខ្លះប្រើ reference_audio ខ្លះប្រើ reference_wav_path )
         kwargs["reference_audio"] = ref_path
         kwargs["reference_wav_path"] = ref_path
     
     try:
         return model.generate(**kwargs)
     except Exception as gen_err:
-        print(f"❌ [MODEL GENERATION ERROR] កំហុសពេលកំពុងផលិតឃ្លា ({text_chunk}): {str(gen_err)}", flush=True)
+        print(f"❌ [MODEL GENERATION ERROR] កំហុសពេលផលិតឃ្លា ({text_chunk}): {str(gen_err)}", flush=True)
         return np.array([], dtype=np.float32)
 
 def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
@@ -100,7 +102,7 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
     temp_ref_path = None
     fallback_ref_path = None
     
-    # ត្រៀមឯកសារសំឡេង Clone (Base64)
+    # គ្រប់គ្រងសំឡេង Clone (Base64)
     if config.mode == "clone" and config.ref_audio_base64 and len(config.ref_audio_base64.strip()) > 100:
         try:
             b64_str = config.ref_audio_base64.split(",")[1] if "," in config.ref_audio_base64 else config.ref_audio_base64
@@ -113,7 +115,7 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
         except Exception as e: 
             print(f"⚠️ [CLONE WARNING] មិនអាចបំប្លែងសំឡេង Clone បានទេ: {e}", flush=True)
 
-    # ត្រៀមឯកសារសំឡេង Preset
+    # គ្រប់គ្រងសំឡេង Preset
     if not temp_ref_path:
         voice_name = re.sub(r'[\[\]]', '', config.preset_name or "ប្រុស១")
         preset_file = f"{voice_name}.wav"
@@ -124,7 +126,7 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
             if fallback_files: 
                 fallback_ref_path = fallback_files[0]
 
-    # កាត់ឃ្លាអត្ថបទដើម្បីផលិតម្តងមួយកង់ៗ
+    # កាត់កង់ឃ្លាអត្ថបទតាមសញ្ញាខណ្ឌ ឬសញ្ញាក្បៀស
     chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
     sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
     
@@ -144,13 +146,13 @@ def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
         
     return np.concatenate(master_audio_chunks) if master_audio_chunks else np.array([], dtype=np.float32)
 
-# --- មុខងារចម្បងសម្រាប់ដោះស្រាយការងារពី RunPod ---
+# --- មុខងារចម្បងឆ្លើយតបសំណើការងាររបស់ RunPod Serverless ---
 def handler(job):
     global model, init_error_message
     
-    # ការពារបញ្ហា NoneType Object Error
+    # បង្ការ និងជូនដំណឹងបើម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI
     if model is None:
-        error_msg = f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុពិត៖ {init_error_message if init_error_message else 'កំពុងទាញយក ឬទំហំ GPU មិនគ្រាន់'}"
+        error_msg = f"ម៉ាស៊ីនមិនទាន់មានម៉ូដែល AI សម្រាប់ដំណើរការឡើយ! មូលហេតុពិត៖ {init_error_message if init_error_message else 'កំពុងទាញយក ឬទំហំឌីសកុងតឺន័រពេញ (Insufficient Disk Space)'}"
         return {"error": error_msg, "audio_base64": "", "status": "error"}
 
     input_data = job.get("input", {})
@@ -198,11 +200,11 @@ def handler(job):
             cfg = SpeakerConfig(mode=mode, preset_name=preset_name, ref_audio_base64=ref_audio_base64)
             final_wav = generate_segment(text, cfg)
 
-        # ការពារបញ្ហាផលិតបានឯកសារទទេ 72 Bytes
+        # ការពារការបោះឯកសារទទេ 72 Bytes ទៅកាន់ Client
         if len(final_wav) == 0: 
             return {"error": "ដំណើរការបរាជ័យ ម៉ូដែល AI មិនអាចបង្កើតសំឡេងចេញពីអត្ថបទនេះបានទេ!", "audio_base64": "", "status": "error"}
         
-        # ធ្វើឱ្យសំឡេងឮច្បាស់ស្មើគ្នា (Normalize Audio)
+        # ធ្វើឱ្យកម្រិតសំឡេងឮច្បាស់ស្មើគ្នា (Normalize Audio)
         max_amp = np.max(np.abs(final_wav))
         if max_amp > 0: 
             final_wav = final_wav / max_amp
@@ -215,7 +217,7 @@ def handler(job):
             try: os.remove(tmp.name)
             except: pass
         
-        # បោះលទ្ធផលត្រឡប់ទៅវិញដោយរៀបចំគន្លឹះ (Keys) ឱ្យមានគ្រប់ទម្រង់ដើម្បីកុំឱ្យទាស់ជាមួយ App
+        # រៀបចំកញ្ចប់ឆ្លើយតបឱ្យមានគ្រប់ទម្រង់ដើម្បីកុំឱ្យទាស់ជាមួយ App Client
         return {
             "audio_base64": out_b64,
             "status": "success",
@@ -229,9 +231,9 @@ def handler(job):
         return {"error": f"Internal Server Error: {str(e)}", "audio_base64": "", "status": "error"}
 
 # =============================================================
-# 🔥 ជំហានដោះស្រាយដ៏សំខាន់៖ ផ្ទុកម៉ូដែល AI ភ្លាមៗពេលដំណើរការ Script
+# 🔥 បញ្ជាឱ្យផ្ទុកម៉ូដែល AI ភ្លាមៗពេលកូដត្រូវបានដំណើរការ
 # =============================================================
 initialize_model_safely()
 
-# ចាប់ផ្តើមដំណើរការប្រព័ន្ធរង់ចាំការងាររបស់ RunPod Serverless
+# បើកប្រព័ន្ធរង់ចាំទទួលសំណើការងារពី RunPod
 runpod.serverless.start({"handler": handler})
