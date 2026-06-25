@@ -18,4 +18,14 @@ COPY . .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # បញ្ជាឱ្យ RunPod បើក handler.py ពេលវាចាប់ផ្តើមដំណើរការ
+# បន្ថែមប្លុកនេះដើម្បីឲ្យ Docker ទាញយកម៉ូដែលទុកជាមុន ពេលវា Build Image
+RUN python3 -c " \
+from huggingface_hub import snapshot_download; \
+snapshot_download(repo_id='Tha456/VoxCPM2', allow_patterns=['*.wav', '**/*.wav'], local_dir='./presets', local_dir_use_symlinks=False); \
+"
+
+RUN python3 -c " \
+from voxcpm import VoxCPM; \
+VoxCPM.from_pretrained('Tha456/VoxCPM2', load_denoiser=True, optimize=False); \
+"
 CMD ["python", "handler.py"]
