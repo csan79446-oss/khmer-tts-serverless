@@ -1,6 +1,8 @@
 import os
 import io
 import re
+import torch._dynamo
+torch._dynamo.config.suppress_errors = True
 import uuid
 import base64
 import torch
