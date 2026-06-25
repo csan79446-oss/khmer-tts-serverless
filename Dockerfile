@@ -24,3 +24,4 @@ VoxCPM.from_pretrained('Tha456/VoxCPM2', load_denoiser=True, optimize=False); \
 
 # បញ្ជាឲ្យរត់កម្មវិធី
 CMD [ "python3", "-u", "handler.py" ]
+
