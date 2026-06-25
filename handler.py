@@ -9,6 +9,7 @@ import numpy as np
 from scipy.io import wavfile
 import runpod
 from voxcpm import VoxCPM
+import traceback 
 
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
@@ -17,14 +18,19 @@ torch._dynamo.config.disable = True
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PRESET_DIR = "./presets"
 
-print("-> កំពុងផ្ទុកម៉וដែល VoxCPM ពី Cache របស់ Container...")
-# ដោយសារយើងបានដោនឡូតទុកក្នុង Docker រួចហើយ បន្ទាត់នេះនឹងរត់លឿនបំផុត (ក្រោម ៥ វិនាទី)
-MODEL_INSTANCE = VoxCPM.from_pretrained(
-    "Tha456/VoxCPM2", 
-    load_denoiser=True,
-    optimize=False
-)
-print("-> ផ្ទុកម៉ូដែលរួចរាល់ ១០០%!")
+# ផ្នែកកែសម្រួលដើម្បីចាប់កំហុសនៅពេល Load Model
+try:
+    print("-> កំពុងផ្ទុកម៉ូដែល VoxCPM...")
+    MODEL_INSTANCE = VoxCPM.from_pretrained(
+        "Tha456/VoxCPM2", 
+        load_denoiser=True,
+        optimize=False
+    )
+    print("-> ផ្ទុកម៉ូដែលរួចរាល់ ១០០%!")
+except Exception as e:
+    print("!!! កំហុសធ្ងន់ធ្ងរពេលផ្ទុកម៉ូដែល !!!")
+    traceback.print_exc() # បង្ហាញ Error លម្អិតក្នុង Log
+    exit(1) # បញ្ឈប់កម្មវិធី ដើម្បីកុំឱ្យវា Restart loop ហើយអ្នកអាចឃើញ Error
 
 def get_speaker_audio_path(preset_name=None):
     default_path = os.path.join(PRESET_DIR, "default.wav")
