@@ -1,8 +1,9 @@
 import os
+# 🔥 ដំណោះស្រាយទី១៖ បង្ខំបញ្ឈប់ torch.compile តាមរយៈ Environment Variable (ដោះស្រាយបញ្ហា Failed to find C compiler ដាច់ខាត)
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 import io
 import re
-import torch._dynamo
-torch._dynamo.config.suppress_errors = True
 import uuid
 import base64
 import torch
@@ -12,7 +13,7 @@ import runpod
 import shutil
 from huggingface_hub import snapshot_download
 
-# បិទ torch.compile ការពារ Cold Start Error
+# បិទ torch.compile គ្រប់ទម្រង់ការពារ Error
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.disable = True
@@ -30,12 +31,14 @@ os.makedirs(PRESET_DIR, exist_ok=True)
 def sync_presets_from_hf():
     """ទាញយកសំឡេងគំរូទាំងអស់ពី Hugging Face មកទុកក្នុងម៉ាស៊ីន"""
     try:
+        print("-> កំពុងទាញយក Presets ពី Hugging Face...")
         snapshot_download(
             repo_id="Tha456/VoxCPM2",
             allow_patterns=["*.wav", "**/*.wav"], 
             local_dir=PRESET_DIR,
             local_dir_use_symlinks=False
         )
+        print("-> ទាញយក Presets ជោគជ័យ!")
     except Exception as e:
         print(f"Warning: មិនអាចទាញយក Presets ពី HF បានទេ: {str(e)}")
 
@@ -45,12 +48,14 @@ def load_tts_model():
     if MODEL_INSTANCE is None:
         sync_presets_from_hf() # ត្រូវតែ Sync មុនពេលផ្ទុកម៉ូដែល
         try:
+            print("-> កំពុងផ្ទុកម៉ូដែល VoxCPM ចូលទៅក្នុង RAM/GPU...")
             model_path = os.environ.get("MODEL_PATH", "Tha456/VoxCPM2")
             MODEL_INSTANCE = VoxCPM.from_pretrained(
                 model_path, 
                 load_denoiser=True,
                 optimize=False
             )
+            print("-> ផ្ទុកម៉ូដែល VoxCPM រួចរាល់ និងត្រៀមខ្លួនដំណើរការ!")
         except Exception as e:
             raise RuntimeError(f"ការផ្ទុកម៉ូដែល VoxCPM បរាជ័យ: {str(e)}")
     return MODEL_INSTANCE
@@ -66,7 +71,7 @@ def cleanup_temp_files():
         pass
 
 def get_speaker_audio_path(preset_name=None):
-    """ស្វែងរកផ្លូវសំឡេងដោយស្វ័យប្រវត្តិ (ទាំង Preset និង Clone ពី Cloud គឺដូចគ្នា)"""
+    """ស្វែងរកផ្លូវសំឡេងដោយស្វ័យប្រវត្តិ"""
     default_path = os.path.join(PRESET_DIR, "default.wav")
     if preset_name:
         clean_name = preset_name.replace(".wav", "")
@@ -96,14 +101,13 @@ def run_tts_inference(model, text, speaker_wav_path):
 def handler(job):
     cleanup_temp_files()
     
-    try:
-        model = load_tts_model()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    # ម៉ូដែលត្រូវបានផ្ទុករួចជាស្រេចតាំងពីម៉ាស៊ីនបើកដំបូង (លែងមានកំហុស Cold Start យូរទៀតហើយ)
+    model = MODEL_INSTANCE 
+    if model is None:
+        return {"status": "error", "message": "ម៉ូដែលមិនទាន់ត្រូវបានដំឡើងត្រឹមត្រូវនៅក្នុងប្រព័ន្ធឡើយ។"}
         
     job_input = job['input']
     
-    # ចាប់យកទិន្នន័យពី Frontend ឱ្យត្រូវ Format ១០០%
     mode = job_input.get("mode", "preset").lower()
     text = job_input.get("text", "")
     preset_name = job_input.get("preset_name", "default")
@@ -118,7 +122,6 @@ def handler(job):
     
     try:
         if mode in ["preset", "clone"]:
-            # ប្រើឈ្មោះពី preset_name ឬ ref_audio_name អាស្រ័យលើ Mode
             target_name = preset_name if mode == "preset" else ref_audio_name
             speaker_wav = get_speaker_audio_path(preset_name=target_name)
             
@@ -129,7 +132,6 @@ def handler(job):
         elif mode == "srt":
             segments = parse_srt_tags(text)
             for speaker, segment_text in segments:
-                # ទាញយកការកំណត់ពី UI (Speaker Map)
                 speaker_info = speaker_map.get(speaker, {})
                 s_mode = speaker_info.get("mode", "preset").lower()
                 target_name = speaker_info.get("preset_name", speaker) if s_mode == "preset" else speaker_info.get("ref_audio_name", speaker)
@@ -165,5 +167,14 @@ def handler(job):
         cleanup_temp_files()
         return {"status": "error", "message": f"កំហុសប្រព័ន្ធដំណើរការ៖ {str(e)}"}
 
+# 🔥 ដំណោះស្រាយទី២៖ ប្តូរមកផ្ទុកម៉ូដែលភ្លាមៗពេលកុងតឺន័រចាប់ផ្តើមដំណើរការ (Pre-loading Model)
 if __name__ == "__main__":
+    print("--- [RunPod Startup] កំពុងចាប់ផ្តើមទាញយកទិន្នន័យ និងរៀបចំប្រព័ន្ធម៉ូដែល... ---")
+    try:
+        load_tts_model()
+        print("--- [RunPod Startup] ប្រព័ន្ធរៀបចំបានជោគជ័យ ១០០%! កំពុងបើកដំណើរការ Serverless... ---")
+    except Exception as startup_error:
+        print(f"--- [RunPod Startup CRASH] ការចាប់ផ្តើមម៉ូដែលបរាជ័យ: {str(startup_error)} ---")
+        raise startup_error
+
     runpod.serverless.start({"handler": handler})
