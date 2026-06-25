@@ -15,10 +15,12 @@ import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.disable = True
 
+# កំណត់អថេរ Global សម្រាប់ Model
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 PRESET_DIR = "./presets"
+MODEL_INSTANCE = None
 
-# ផ្នែកកែសម្រួលដើម្បីចាប់កំហុសនៅពេល Load Model
+# ព្យាយាមផ្ទុក Model ដោយមិនប្រើ exit(1)
 try:
     print("-> កំពុងផ្ទុកម៉ូដែល VoxCPM...")
     MODEL_INSTANCE = VoxCPM.from_pretrained(
@@ -29,8 +31,8 @@ try:
     print("-> ផ្ទុកម៉ូដែលរួចរាល់ ១០០%!")
 except Exception as e:
     print("!!! កំហុសធ្ងន់ធ្ងរពេលផ្ទុកម៉ូដែល !!!")
-    traceback.print_exc() # បង្ហាញ Error លម្អិតក្នុង Log
-    exit(1) # បញ្ឈប់កម្មវិធី ដើម្បីកុំឱ្យវា Restart loop ហើយអ្នកអាចឃើញ Error
+    traceback.print_exc()
+    # កុំប្រើ exit(1)! ទុកឱ្យ MODEL_INSTANCE នៅជា None ដើម្បីឱ្យ handler ដឹងថាវាមានបញ្ហា
 
 def get_speaker_audio_path(preset_name=None):
     default_path = os.path.join(PRESET_DIR, "default.wav")
@@ -56,7 +58,11 @@ def run_tts_inference(model, text, speaker_wav_path):
     return sample_rate, wav
 
 def handler(job):
-    job_input = job['input']
+    # ពិនិត្យមើលថាតើ Model បានផ្ទុកជោគជ័យឬអត់
+    if MODEL_INSTANCE is None:
+        return {"status": "error", "message": "ម៉ូដែលមិនត្រូវបានផ្ទុកទេ។ សូមពិនិត្យ Log របស់ Container។"}
+
+    job_input = job.get('input', {})
     mode = job_input.get("mode", "preset").lower()
     text = job_input.get("text", "")
     preset_name = job_input.get("preset_name", "default")
@@ -107,10 +113,10 @@ def handler(job):
                 "format": "wav"
             }
         else:
-            return {"status": "error", "message": "ការរៀបចំទិន្នន័យសំឡេងមិនបានសម្រេច។"}
+            return {"status": "error", "message": "ការបង្កើតសំឡេងមិនបានសម្រេច (ទិន្នន័យទទេ)។"}
             
     except Exception as e:
-        return {"status": "error", "message": f"កំហុសប្រព័ន្ធដំណើរការ៖ {str(e)}"}
+        return {"status": "error", "message": f"កំហុសប្រព័ន្ធ៖ {str(e)}"}
 
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
