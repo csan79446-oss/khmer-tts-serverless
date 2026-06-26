@@ -1,24 +1,22 @@
-# Base Image
-FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+# ប្រើ Base Image របស់ PyTorch
+FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
 
-# ដំឡើង System Dependencies ដែលសំខាន់សម្រាប់ Audio Processing
+# ដំឡើង dependencies របស់ប្រព័ន្ធ
+# បន្ថែម libsndfile1 ដើម្បីធានាថា Library soundfile ដំណើរការបានរលូន
 RUN apt-get update && apt-get install -y \
-    libsndfile1 \
     ffmpeg \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-# កំណត់ Working Directory
-WORKDIR /
+# កំណត់កន្លែងធ្វើការ
+WORKDIR /app
 
-# ចម្លង requirements ចូល
+# ដំឡើង Python dependencies
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# ដំឡើងបណ្ណាល័យ
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# ចម្លងកូដកម្មវិធីទាំងអស់ចូល
+# កូពី source code ទាំងអស់
 COPY . .
 
-# បញ្ជាឱ្យកម្មវិធីរត់
-CMD [ "python3", "-u", "handler.py" ]
+# ចាប់ផ្តើមដំណើរការ handler
+CMD ["python", "handler.py"]
