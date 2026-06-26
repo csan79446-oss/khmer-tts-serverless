@@ -87,41 +87,49 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
         return np.array([], dtype=np.float32)
         
     ref_wav_path = None
-    tmp_b64_audio_path = None # អញ្ញត្តិសម្រាប់រក្សាទុកទីតាំង File បណ្តោះអាសន្ន ដើម្បីលុបចោលវិញ
+    temp_wav_file = None  # សម្រាប់លុបចោលវិញក្រោយពេលដេរភ្ជាប់រួច
     
     mode = config.get("mode", "preset")
     ref_audio_name = config.get("ref_audio_name")
-    ref_audio_base64 = config.get("ref_audio_base64") # ចាប់យកទិន្នន័យ Base64 ដែល Frontend ផ្ញើមក
+    ref_audio_base64 = config.get("ref_audio_base64")  # <-- ចាប់យក Base64 ពី Frontend
     preset_name = config.get("preset_name", "[ប្រុស១]")
     
-    # ១. ករណី Clone ដោយប្រើសំឡេងដែល Upload ពី Frontend (បំប្លែង Base64 ទៅ File)
-    if mode == "clone" and ref_audio_base64:
-        try:
-            audio_bytes = base64.b64decode(ref_audio_base64)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                tmp.write(audio_bytes)
-                ref_wav_path = tmp.name
-                tmp_b64_audio_path = tmp.name
-        except Exception as e:
-            print(f"⚠️ ការបំប្លែង Base64 បរាជ័យ៖ {str(e)}")
+    # === កូដដោះស្រាយការ Clone សំឡេងផ្ទាល់ខ្លួន ===
+    if mode == "clone":
+        if ref_audio_base64:
+            try:
+                print("🛸 កំពុងបម្លែងទិន្នន័យសំឡេង Base64 ពី Frontend ទៅជាហ្វាល់ WAV...")
+                audio_bytes = base64.b64decode(ref_audio_base64)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                    tmp.write(audio_bytes)
+                    ref_wav_path = tmp.name
+                    temp_wav_file = tmp.name
+            except Exception as e:
+                print(f"⚠️ ការបម្លែង Base64 Audio របស់តួអង្គបានបរាជ័យ៖ {str(e)}")
+        elif ref_audio_name:
+            try:
+                ref_wav_path = prepare_reference_audio(ref_audio_name)
+            except Exception as e:
+                print(f"⚠️ ការទាញយកសំឡេង Clone ពី Hugging Face បរាជ័យ៖ {str(e)}")
 
-    # ២. ករណី Clone ដោយទាញយកពី Hugging Face (ប្រើឈ្មោះហ្វាល់)
-    elif mode == "clone" and ref_audio_name:
-        try:
-            ref_wav_path = prepare_reference_audio(ref_audio_name)
-        except Exception as e:
-            print(f"⚠️ ការទាញយកសំឡេង Clone បរាជ័យ៖ {str(e)}")
-
-    # ៣. ករណីស្វែងរកហ្វាល់ Preset ធម្មតា ប្រសិនបើរកសំឡេង Clone មិនឃើញ
+    # === កូដដោះស្រាយសំឡេង Preset របស់ប្រព័ន្ធ ===
     if not ref_wav_path:
         voice_name = re.sub(r'[\[\]]', '', preset_name)
         preset_file = f"{voice_name}.wav"
+        cache_path = os.path.join("/workspace/reference_audio_cache", preset_file)
+        
         if os.path.exists(preset_file):
             ref_wav_path = preset_file
+        elif os.path.exists(cache_path):
+            ref_wav_path = cache_path
         else:
-            fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
-            if fallback_files:
-                ref_wav_path = fallback_files[0]
+            try:
+                # បើគ្មានហ្វាល់ Preset ក្នុងម៉ាស៊ីន ព្យាយាមទាញយកវាពី Hugging Face ស្វ័យប្រវត្តិកុំឱ្យគាំង
+                ref_wav_path = prepare_reference_audio(preset_file)
+            except Exception:
+                fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
+                if fallback_files:
+                    ref_wav_path = fallback_files[0]
 
     chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
     sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
@@ -138,9 +146,12 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
             if i < len(sentences) - 1:
                 master_audio_chunks.append(silence_array)
 
-    # លុបឯកសារសំឡេងបណ្តោះអាសន្នចេញវិញ ដើម្បីកុំឱ្យពេញទំហំផ្ទុក (Memory) របស់ Server
-    if tmp_b64_audio_path and os.path.exists(tmp_b64_audio_path):
-        os.remove(tmp_b64_audio_path)
+    # លុបហ្វាល់បណ្ដោះអាសន្នចោលដើម្បីកុំឱ្យណែនទំហំ Server (Storage)
+    if temp_wav_file and os.path.exists(temp_wav_file):
+        try:
+            os.remove(temp_wav_file)
+        except Exception:
+            pass
 
     if not master_audio_chunks:
         return np.array([], dtype=np.float32)
@@ -155,7 +166,6 @@ def handler(job):
         req_mode = job_input.get("mode", "preset")
         req_preset_name = job_input.get("preset_name", "[ប្រុស១]")
         req_ref_audio_name = job_input.get("ref_audio_name")
-        req_ref_audio_base64 = job_input.get("ref_audio_base64") # ចាប់យក Base64
         req_speaker_map = job_input.get("speaker_map", {})
 
         if not req_text:
@@ -201,6 +211,8 @@ def handler(job):
                 else:
                     last_end_time = end_sec
             
+            if not master_audio:
+                return {"error": "ការផលិតសំឡេងតាមទម្រង់ SRT បរាជ័យ (គ្មានទិន្នន័យសំឡេងត្រូវបានបង្កើត)។"}
             final_wav = np.concatenate(master_audio)
             
         else:
@@ -208,7 +220,7 @@ def handler(job):
                 "mode": req_mode, 
                 "preset_name": req_preset_name, 
                 "ref_audio_name": req_ref_audio_name,
-                "ref_audio_base64": req_ref_audio_base64 # បញ្ជូនបន្តទៅកាន់ប្រព័ន្ធផលិតសំឡេង
+                "ref_audio_base64": job_input.get("ref_audio_base64") # <-- ចាប់យកសម្រាប់ Mode Clone ធម្មតា
             }
             final_wav = generate_segment(req_text, default_cfg)
 
