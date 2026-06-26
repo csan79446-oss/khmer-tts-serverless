@@ -1,6 +1,4 @@
-# ✅ ប្រែប្រាួល: torch ត្រូវ install ជាមួយ CUDA 12.1 ជាមុនសិននៅ Dockerfile
-# កុំដាក់ torch នៅទីនេះ ព្រោះបាន install នៅ Dockerfile ហើយ
-
+# ❌ កុំដាក់ torch នៅទីនេះ (បាន install នៅ Dockerfile ហើយ)
 transformers>=4.36.0
 safetensors>=0.4.0
 accelerate>=0.25.0
