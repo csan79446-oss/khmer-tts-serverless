@@ -1,7 +1,19 @@
-runpod
+--index-url https://download.pytorch.org/whl/cu121
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# Transformers & HuggingFace
+transformers>=4.36.0
+safetensors>=0.4.0
+accelerate>=0.25.0
+huggingface-hub>=0.19.0
+
+# Audio processing
 numpy
+scipy
 soundfile
-voxcpm
-huggingface_hub
-torch
 pydub
+tqdm
+
+# RunPod
+runpod
