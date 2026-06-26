@@ -6,11 +6,9 @@ import numpy as np
 import soundfile as sf
 import runpod
 import torch
-from pydub import AudioSegment
-from huggingface_hub import hf_hub_download
 
 # ==========================================
-# ✅ កំណត់ Device (GPU vs CPU)
+# ✅ កំណត់ Device
 # ==========================================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"🔥 PyTorch CUDA available: {torch.cuda.is_available()}")
@@ -21,75 +19,61 @@ if torch.cuda.is_available():
     print(f"🔥 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
     torch.backends.cudnn.benchmark = True
 else:
-    print("⚠️ កំពុងដំណើរការលើ CPU! សូមពិនិត្យមើល CUDA Driver ឬ Dockerfile...")
+    print("⚠️ កំពុងដំណើរការលើ CPU!")
 
 # ==========================================
-# ✅ ទាញយក VoxCPM2 ពី Hugging Face
+# ✅ Load Model
 # ==========================================
 print("⚙️ កំពុងទាញយក VoxCPM2 ពី Hugging Face...")
 REPO_ID = "Tha456/VoxCPM2"
-
-# ទាញយក model files ទាំងអស់
 MODEL_DIR = "/workspace/VoxCPM2"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-def download_model_files():
-    """Download all necessary files from Hugging Face"""
-    files_to_download = [
-        "model.safetensors",
-        "audiovae.pth",
-        "config.json",
-        "generation_config.json",
-        "preprocessor_config.json",
-        "tokenizer_config.json",
-        "vocab.json",
-        "merges.txt",
-        "special_tokens_map.json"
-    ]
-    
-    for filename in files_to_download:
-        try:
-            filepath = hf_hub_download(
-                repo_id=REPO_ID,
-                filename=filename,
-                local_dir=MODEL_DIR,
-                local_dir_use_symlinks=False
-            )
-            print(f"✅ Downloaded: {filename}")
-        except Exception as e:
-            print(f"⚠️ Could not download {filename}: {e}")
-
-download_model_files()
-
-# ==========================================
-# ✅ Load Model លើ GPU
-# ==========================================
-print("⚙️ កំពុង Load Model VoxCPM2...")
-
-# ប្រើ transformers សម្រាប់ load model
+from huggingface_hub import hf_hub_download
 from transformers import AutoModel, AutoTokenizer
 
+# Download model files
+files_to_download = [
+    "model.safetensors",
+    "audiovae.pth",
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json"
+]
+
+for filename in files_to_download:
+    try:
+        filepath = hf_hub_download(
+            repo_id=REPO_ID,
+            filename=filename,
+            local_dir=MODEL_DIR,
+            local_dir_use_symlinks=False
+        )
+        print(f"✅ Downloaded: {filename}")
+    except Exception as e:
+        print(f"⚠️ Could not download {filename}: {e}")
+
+# Load model
+print("⚙️ កំពុង Load Model...")
 try:
-    # ព្យាយាម load ពី local directory
     model = AutoModel.from_pretrained(MODEL_DIR, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
-    
-    # បញ្ជូនទៅ GPU
     model = model.to(DEVICE)
     model.eval()
-    
-    print(f"✅ Model loaded successfully on {DEVICE}!")
-    
+    print(f"✅ Model loaded on {DEVICE}!")
 except Exception as e:
     print(f"❌ Error loading model: {e}")
-    # Fallback: try loading directly from HuggingFace
-    print("🔄 Trying to load directly from HuggingFace...")
+    # Fallback
     model = AutoModel.from_pretrained(REPO_ID, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(REPO_ID, trust_remote_code=True)
     model = model.to(DEVICE)
     model.eval()
 
-# បើក torch.compile លើ CUDA
+# torch.compile
 if DEVICE == "cuda" and hasattr(torch, 'compile'):
     try:
         model = torch.compile(model, mode="reduce-overhead")
@@ -97,11 +81,11 @@ if DEVICE == "cuda" and hasattr(torch, 'compile'):
     except Exception as e:
         print(f"⚠️ torch.compile failed: {e}")
 
-SAMPLE_RATE = 24000  # ឬពី model config
+SAMPLE_RATE = 24000
 print(f"✅ Sample Rate: {SAMPLE_RATE}Hz")
 
 # ==========================================
-# មុខងារជំនួយ
+# Helper functions
 # ==========================================
 NUMBERS_MAP = {
     '0': 'សូន្យ', '1': 'មួយ', '2': 'ពីរ', '3': 'បី', '4': 'បួន',
@@ -125,63 +109,46 @@ def srt_time_to_seconds(time_str: str) -> float:
         return 0.0
 
 def prepare_reference_audio(filename: str) -> str:
-    """Download reference audio from Hugging Face"""
     local_dir = "/workspace/reference_audio_cache"
     os.makedirs(local_dir, exist_ok=True)
-    
     local_path = os.path.join(local_dir, filename)
     
     if not os.path.exists(local_path):
-        print(f"📥 កំពុងទាញយក {filename} ពី Hugging Face...")
+        print(f"📥 កំពុងទាញយក {filename}...")
         try:
-            hf_hub_download(
-                repo_id=REPO_ID, 
-                filename=filename, 
-                local_dir=local_dir,
-                local_dir_use_symlinks=False
-            )
+            hf_hub_download(repo_id=REPO_ID, filename=filename, local_dir=local_dir, local_dir_use_symlinks=False)
         except Exception as e:
             print(f"⚠️ ការទាញយកបរាជ័យ: {e}")
             return None
     
-    # បម្លែង MP3 ទៅ WAV
     if filename.lower().endswith(".mp3"):
         wav_path = local_path.replace(".mp3", ".wav")
         if not os.path.exists(wav_path):
-            print(f"🔄 កំពុងបម្លែង {filename} ទៅជា WAV...")
             try:
+                from pydub import AudioSegment
                 audio = AudioSegment.from_mp3(local_path)
                 audio.export(wav_path, format="wav")
-            except Exception as e:
-                print(f"⚠️ ការបម្លែងបរាជ័យ: {e}")
+            except:
                 return local_path
         return wav_path
-        
     return local_path
 
 def _generate_single_audio(text_chunk: str, ref_wav_path: str = None) -> np.ndarray:
-    """Generate audio for a single text chunk"""
     try:
-        # TODO: ប្តូរទៅជាការហៅ model.generate() ពិតប្រាកដ
-        # នេះជាគំរូដើម្បីបង្ហាញ structure:
-        
         inputs = tokenizer(text_chunk, return_tensors="pt")
         inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
         
         with torch.no_grad():
-            # ប្តូរទៅជា method ពិតប្រាកដរបស់ VoxCPM2
             output = model.generate(**inputs)
             
-        # បម្លែង output ទៅ numpy array
         if isinstance(output, torch.Tensor):
             audio = output.cpu().numpy().squeeze()
         else:
             audio = np.array(output)
             
         return audio.astype(np.float32)
-        
     except Exception as gen_err:
-        print(f"❌ កំហុសពេល Model កំពុងដំណើរការ៖ {str(gen_err)}")
+        print(f"❌ កំហុស: {str(gen_err)}")
         return np.array([], dtype=np.float32)
 
 def generate_segment(text: str, config: dict) -> np.ndarray:
@@ -197,11 +164,9 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
     ref_audio_base64 = config.get("ref_audio_base64")
     preset_name = config.get("preset_name", "[ប្រុស១]")
     
-    # === ការ Clone សំឡេងផ្ទាល់ខ្លួន ===
     if mode == "clone":
         if ref_audio_base64:
             try:
-                print("🛸 កំពុងបម្លែង Base64 ទៅជា WAV...")
                 audio_bytes = base64.b64decode(ref_audio_base64)
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                     tmp.write(audio_bytes)
@@ -212,19 +177,16 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
         elif ref_audio_name:
             ref_wav_path = prepare_reference_audio(ref_audio_name)
 
-    # === សំឡេង Preset ===
     if not ref_wav_path:
         voice_name = re.sub(r'[\[\]]', '', preset_name)
         preset_file = f"{voice_name}.wav"
         ref_wav_path = prepare_reference_audio(preset_file)
         
-        # Fallback
         if not ref_wav_path:
             fallback_files = [f for f in os.listdir('/workspace/reference_audio_cache') if f.endswith('.wav')]
             if fallback_files:
                 ref_wav_path = os.path.join('/workspace/reference_audio_cache', fallback_files[0])
 
-    # បំបែកអត្ថបទ
     chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
     sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
     
@@ -232,7 +194,7 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
     silence_array = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
 
     for i, sentence in enumerate(sentences):
-        print(f"   -> កំពុងអានប្រយោគទី {i+1}: {sentence[:30]}...")
+        print(f"   -> ប្រយោគទី {i+1}: {sentence[:30]}...")
         seg_wav = _generate_single_audio(sentence, ref_wav_path)
         
         if len(seg_wav) > 0:
@@ -240,11 +202,10 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
             if i < len(sentences) - 1:
                 master_audio_chunks.append(silence_array)
 
-    # លុបហ្វាល់បណ្ដោះអាសន្ន
     if temp_wav_file and os.path.exists(temp_wav_file):
         try:
             os.remove(temp_wav_file)
-        except Exception:
+        except:
             pass
 
     if not master_audio_chunks:
@@ -253,7 +214,7 @@ def generate_segment(text: str, config: dict) -> np.ndarray:
     return np.concatenate(master_audio_chunks)
 
 # ==========================================
-# ✅ RunPod Handler
+# RunPod Handler
 # ==========================================
 def handler(job):
     try:
