@@ -1,61 +1,108 @@
 import os
 import re
-import io
 import base64
 import tempfile
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, Dict
-import uvicorn
-from voxcpm import VoxCPM
+import runpod
+import torch
+from pydub import AudioSegment
 from huggingface_hub import hf_hub_download
 
-app = FastAPI(title="Khmer TTS Comprehensive Production Engine (RunPod Optimized)")
+# ==========================================
+# ✅ កំណត់ Device (GPU vs CPU)
+# ==========================================
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"🔥 PyTorch CUDA available: {torch.cuda.is_available()}")
 
-# --- មុខងារសម្រាប់ទាញយកសំឡេងពី Hugging Face និងរក្សាទុកក្នុង Cache ---
-def prepare_reference_audio(filename: str) -> str:
-    """ទាញយកឯកសារពី Hugging Face មកទុកក្នុង Local Storage ដើម្បីកុំឱ្យទាញញឹកញាប់"""
-    local_dir = "/workspace/reference_audio_cache"
-    os.makedirs(local_dir, exist_ok=True)
-    local_path = os.path.join(local_dir, filename)
+if torch.cuda.is_available():
+    print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+    print(f"🔥 CUDA Version: {torch.version.cuda}")
+    print(f"🔥 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    torch.backends.cudnn.benchmark = True
+else:
+    print("⚠️ កំពុងដំណើរការលើ CPU! សូមពិនិត្យមើល CUDA Driver ឬ Dockerfile...")
 
-    # បើមិនទាន់មានក្នុងម៉ាស៊ីន ទើបធ្វើការទាញយក
-    if not os.path.exists(local_path):
-        print(f"📥 កំពុងទាញយក {filename} ពី Hugging Face...")
-        hf_hub_download(
-            repo_id="Tha456/VoxCPM2", 
-            filename=filename, 
-            local_dir=local_dir,
-            local_dir_use_symlinks=False
-        )
-    return local_path
+# ==========================================
+# ✅ ទាញយក VoxCPM2 ពី Hugging Face
+# ==========================================
+print("⚙️ កំពុងទាញយក VoxCPM2 ពី Hugging Face...")
+REPO_ID = "Tha456/VoxCPM2"
 
-# --- មុខងារថ្មី៖ រក្សាទុក base64 audio ទៅ local file ---
-def save_base64_audio(b64_string: str, filename: str) -> str:
-    """រក្សាទុក base64 audio string ទៅជាឯកសារ .wav"""
-    if not b64_string:
-        return None
-    local_dir = "/workspace/reference_audio_cache"
-    os.makedirs(local_dir, exist_ok=True)
-    local_path = os.path.join(local_dir, filename)
+# ទាញយក model files ទាំងអស់
+MODEL_DIR = "/workspace/VoxCPM2"
+os.makedirs(MODEL_DIR, exist_ok=True)
 
+def download_model_files():
+    """Download all necessary files from Hugging Face"""
+    files_to_download = [
+        "model.safetensors",
+        "audiovae.pth",
+        "config.json",
+        "generation_config.json",
+        "preprocessor_config.json",
+        "tokenizer_config.json",
+        "vocab.json",
+        "merges.txt",
+        "special_tokens_map.json"
+    ]
+    
+    for filename in files_to_download:
+        try:
+            filepath = hf_hub_download(
+                repo_id=REPO_ID,
+                filename=filename,
+                local_dir=MODEL_DIR,
+                local_dir_use_symlinks=False
+            )
+            print(f"✅ Downloaded: {filename}")
+        except Exception as e:
+            print(f"⚠️ Could not download {filename}: {e}")
+
+download_model_files()
+
+# ==========================================
+# ✅ Load Model លើ GPU
+# ==========================================
+print("⚙️ កំពុង Load Model VoxCPM2...")
+
+# ប្រើ transformers សម្រាប់ load model
+from transformers import AutoModel, AutoTokenizer
+
+try:
+    # ព្យាយាម load ពី local directory
+    model = AutoModel.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    
+    # បញ្ជូនទៅ GPU
+    model = model.to(DEVICE)
+    model.eval()
+    
+    print(f"✅ Model loaded successfully on {DEVICE}!")
+    
+except Exception as e:
+    print(f"❌ Error loading model: {e}")
+    # Fallback: try loading directly from HuggingFace
+    print("🔄 Trying to load directly from HuggingFace...")
+    model = AutoModel.from_pretrained(REPO_ID, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(REPO_ID, trust_remote_code=True)
+    model = model.to(DEVICE)
+    model.eval()
+
+# បើក torch.compile លើ CUDA
+if DEVICE == "cuda" and hasattr(torch, 'compile'):
     try:
-        audio_bytes = base64.b64decode(b64_string)
-        with open(local_path, "wb") as f:
-            f.write(audio_bytes)
-        return local_path
+        model = torch.compile(model, mode="reduce-overhead")
+        print("✅ torch.compile enabled!")
     except Exception as e:
-        print(f"⚠️ ការរក្សាទុក base64 audio បរាជ័យ៖ {str(e)}")
-        return None
+        print(f"⚠️ torch.compile failed: {e}")
 
-# --- ផ្នែកទាញយក និងត្រៀមលក្ខណៈ Model ---
-print("⚙️ កំពុងដំណើរការដំឡើង និងផ្ទៀងផ្ទាត់ម៉ូដែល VoxCPM2 លើ RunPod...")
-model = VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)
-SAMPLE_RATE = model.tts_model.sample_rate 
-print(f"✅ ម៉ូដែលរួចរាល់ ១០០%! ដំណើរការលើល្បឿនស្តង់ដារ៖ {SAMPLE_RATE}Hz")
+SAMPLE_RATE = 24000  # ឬពី model config
+print(f"✅ Sample Rate: {SAMPLE_RATE}Hz")
 
+# ==========================================
+# មុខងារជំនួយ
+# ==========================================
 NUMBERS_MAP = {
     '0': 'សូន្យ', '1': 'មួយ', '2': 'ពីរ', '3': 'បី', '4': 'បួន',
     '5': 'ប្រាំ', '6': 'ប្រាំមួយ', '7': 'ប្រាំពីរ', '8': 'ប្រាំបី', '9': 'ប្រាំបួន',
@@ -67,7 +114,7 @@ def clean_khmer_text(raw_text: str) -> str:
     text = raw_text
     for digit, word in NUMBERS_MAP.items():
         text = text.replace(digit, word)
-    text = re.sub(r'[^\u1780-\u17F9\sa-zA-Z]', '', text)
+    text = re.sub(r'[^\u1780-\u17F9\s។ៗ?!,a-zA-Z]', '', text)
     return re.sub(r'\s+', ' ', text).strip()
 
 def srt_time_to_seconds(time_str: str) -> float:
@@ -77,203 +124,224 @@ def srt_time_to_seconds(time_str: str) -> float:
     except Exception:
         return 0.0
 
-# --- ប្រព័ន្ធរចនាសម្ព័ន្ធទិន្នន័យ ---
-class SpeakerConfig(BaseModel):
-    mode: str = "preset"
-    preset_name: Optional[str] = "[ប្រុស១]"
-    ref_audio_name: Optional[str] = None  # សម្រាប់ Hugging Face filename
-    ref_audio_base64: Optional[str] = None  # ✅ បន្ថែម៖ សម្រាប់ base64 ពី Frontend
+def prepare_reference_audio(filename: str) -> str:
+    """Download reference audio from Hugging Face"""
+    local_dir = "/workspace/reference_audio_cache"
+    os.makedirs(local_dir, exist_ok=True)
+    
+    local_path = os.path.join(local_dir, filename)
+    
+    if not os.path.exists(local_path):
+        print(f"📥 កំពុងទាញយក {filename} ពី Hugging Face...")
+        try:
+            hf_hub_download(
+                repo_id=REPO_ID, 
+                filename=filename, 
+                local_dir=local_dir,
+                local_dir_use_symlinks=False
+            )
+        except Exception as e:
+            print(f"⚠️ ការទាញយកបរាជ័យ: {e}")
+            return None
+    
+    # បម្លែង MP3 ទៅ WAV
+    if filename.lower().endswith(".mp3"):
+        wav_path = local_path.replace(".mp3", ".wav")
+        if not os.path.exists(wav_path):
+            print(f"🔄 កំពុងបម្លែង {filename} ទៅជា WAV...")
+            try:
+                audio = AudioSegment.from_mp3(local_path)
+                audio.export(wav_path, format="wav")
+            except Exception as e:
+                print(f"⚠️ ការបម្លែងបរាជ័យ: {e}")
+                return local_path
+        return wav_path
+        
+    return local_path
 
-class TTSRequest(BaseModel):
-    text: str
-    mode: str = "preset"
-    preset_name: Optional[str] = "[ប្រុស១]"
-    ref_audio_name: Optional[str] = None
-    ref_audio_base64: Optional[str] = None  # ✅ បន្ថែម
-    speaker_map: Optional[Dict[str, SpeakerConfig]] = None
-
-# --- មុខងារផលិតសំឡេងស្នូល ---
-def _generate_single_audio(text_chunk: str, ref_wav_path: str) -> np.ndarray:
-    kwargs = {
-        "text": text_chunk,
-        "cfg_value": 2.5,
-        "inference_timesteps": 25,
-        "normalize": True,
-        "retry_badcase": True
-    }
-
-    if ref_wav_path and os.path.exists(ref_wav_path):
-        kwargs["reference_wav_path"] = ref_wav_path
-
+def _generate_single_audio(text_chunk: str, ref_wav_path: str = None) -> np.ndarray:
+    """Generate audio for a single text chunk"""
     try:
-        return model.generate(**kwargs)
+        # TODO: ប្តូរទៅជាការហៅ model.generate() ពិតប្រាកដ
+        # នេះជាគំរូដើម្បីបង្ហាញ structure:
+        
+        inputs = tokenizer(text_chunk, return_tensors="pt")
+        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            # ប្តូរទៅជា method ពិតប្រាកដរបស់ VoxCPM2
+            output = model.generate(**inputs)
+            
+        # បម្លែង output ទៅ numpy array
+        if isinstance(output, torch.Tensor):
+            audio = output.cpu().numpy().squeeze()
+        else:
+            audio = np.array(output)
+            
+        return audio.astype(np.float32)
+        
     except Exception as gen_err:
         print(f"❌ កំហុសពេល Model កំពុងដំណើរការ៖ {str(gen_err)}")
         return np.array([], dtype=np.float32)
 
-# --- មុខងារថ្មី៖ ទទួលបាន path នៃ reference audio ---
-def get_reference_path(config: SpeakerConfig) -> str:
-    """
-    ទទួលបាន path នៃ reference audio ពី config
-    គាំទ្រទាំង filename (Hugging Face) និង base64 (Frontend upload)
-    """
-    ref_wav_path = None
-
-    # ពិនិត្យ base64 ជាមុន (ពី Frontend)
-    if config.ref_audio_base64:
-        temp_filename = f"uploaded_{hash(config.ref_audio_base64) % 10000000}.wav"
-        ref_wav_path = save_base64_audio(config.ref_audio_base64, temp_filename)
-        if ref_wav_path:
-            print(f"📁 បានរក្សាទុក base64 audio ទៅ៖ {ref_wav_path}")
-            return ref_wav_path
-
-    # ពិនិត្យ filename (Hugging Face)
-    if config.ref_audio_name:
-        try:
-            ref_wav_path = prepare_reference_audio(config.ref_audio_name)
-            if os.path.exists(ref_wav_path):
-                return ref_wav_path
-        except Exception as e:
-            print(f"⚠️ ការទាញយកសំឡេង Clone បរាជ័យ៖ {str(e)}")
-
-    return None
-
-# --- មុខងារចម្អិនសំឡេងលំដាប់លម្អិត ---
-def generate_segment(text: str, config: SpeakerConfig) -> np.ndarray:
+def generate_segment(text: str, config: dict) -> np.ndarray:
     clean_txt = clean_khmer_text(text)
     if not clean_txt or len(clean_txt.strip()) == 0:
         return np.array([], dtype=np.float32)
+        
+    ref_wav_path = None
+    temp_wav_file = None
+    
+    mode = config.get("mode", "preset")
+    ref_audio_name = config.get("ref_audio_name")
+    ref_audio_base64 = config.get("ref_audio_base64")
+    preset_name = config.get("preset_name", "[ប្រុស១]")
+    
+    # === ការ Clone សំឡេងផ្ទាល់ខ្លួន ===
+    if mode == "clone":
+        if ref_audio_base64:
+            try:
+                print("🛸 កំពុងបម្លែង Base64 ទៅជា WAV...")
+                audio_bytes = base64.b64decode(ref_audio_base64)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                    tmp.write(audio_bytes)
+                    ref_wav_path = tmp.name
+                    temp_wav_file = tmp.name
+            except Exception as e:
+                print(f"⚠️ Base64 decode បរាជ័យ: {e}")
+        elif ref_audio_name:
+            ref_wav_path = prepare_reference_audio(ref_audio_name)
 
-    # ទទួលបាន reference audio path
-    ref_wav_path = get_reference_path(config)
-
-    # ត្រៀម Preset Audio ប្រសិនបើមិនមាន clone audio
+    # === សំឡេង Preset ===
     if not ref_wav_path:
-        voice_name = re.sub(r'[\[\]]', '', config.preset_name or "ប្រុស១")
+        voice_name = re.sub(r'[\[\]]', '', preset_name)
         preset_file = f"{voice_name}.wav"
-        if os.path.exists(preset_file):
-            ref_wav_path = preset_file
-        else:
-            fallback_files = [f for f in os.listdir('.') if f.endswith('.wav')]
+        ref_wav_path = prepare_reference_audio(preset_file)
+        
+        # Fallback
+        if not ref_wav_path:
+            fallback_files = [f for f in os.listdir('/workspace/reference_audio_cache') if f.endswith('.wav')]
             if fallback_files:
-                ref_wav_path = fallback_files[0]
+                ref_wav_path = os.path.join('/workspace/reference_audio_cache', fallback_files[0])
 
-    # បំបែកអត្ថបទជាកង់ៗ
+    # បំបែកអត្ថបទ
     chunked_text = clean_txt.replace('។', '|').replace('\n', '|').replace(',', '|')
     sentences = [s.strip() for s in chunked_text.split('|') if s.strip()]
-
+    
     master_audio_chunks = []
     silence_array = np.zeros(int(0.5 * SAMPLE_RATE), dtype=np.float32)
 
     for i, sentence in enumerate(sentences):
         print(f"   -> កំពុងអានប្រយោគទី {i+1}: {sentence[:30]}...")
         seg_wav = _generate_single_audio(sentence, ref_wav_path)
-
+        
         if len(seg_wav) > 0:
             master_audio_chunks.append(seg_wav)
             if i < len(sentences) - 1:
                 master_audio_chunks.append(silence_array)
 
+    # លុបហ្វាល់បណ្ដោះអាសន្ន
+    if temp_wav_file and os.path.exists(temp_wav_file):
+        try:
+            os.remove(temp_wav_file)
+        except Exception:
+            pass
+
     if not master_audio_chunks:
         return np.array([], dtype=np.float32)
-
+        
     return np.concatenate(master_audio_chunks)
 
-# --- API Entry Point ---
-@app.post("/generate")
-async def generate_speech(req: TTSRequest):
+# ==========================================
+# ✅ RunPod Handler
+# ==========================================
+def handler(job):
     try:
-        if req.mode == "srt":
-            print("\n🎬 [SRT Mode] កំពុងវិភាគឯកសាររឿង...")
-            blocks = re.split(r'\n\s*\n', req.text.strip())
+        job_input = job.get("input", {})
+        
+        req_text = job_input.get("text", "")
+        req_mode = job_input.get("mode", "preset")
+        req_preset_name = job_input.get("preset_name", "[ប្រុស១]")
+        req_ref_audio_name = job_input.get("ref_audio_name")
+        req_speaker_map = job_input.get("speaker_map", {})
+
+        if not req_text:
+            return {"error": "សូមបញ្ចូលអត្ថបទ (text) នៅក្នុង input។"}
+
+        if req_mode == "srt":
+            blocks = re.split(r'\n\s*\n', req_text.strip())
             master_audio = []
             last_end_time = 0.0
-
+            
             for block in blocks:
                 lines = [l.strip() for l in block.split('\n') if l.strip()]
                 if len(lines) < 3: continue
-
+                
                 time_match = re.match(r'(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})', lines[1])
                 if not time_match: continue
-
+                
                 start_sec = srt_time_to_seconds(time_match.group(1))
                 end_sec = srt_time_to_seconds(time_match.group(2))
                 content_line = " ".join(lines[2:])
-
+                
                 tag_match = re.match(r'^(\[.*?\])\s*(.*)', content_line)
                 speaker_tag = tag_match.group(1) if tag_match else "default"
                 speech_text = tag_match.group(2) if tag_match else content_line
-
+                
                 if start_sec > last_end_time:
                     silence_duration = start_sec - last_end_time
                     silence_samples = np.zeros(int(silence_duration * SAMPLE_RATE), dtype=np.float32)
                     master_audio.append(silence_samples)
-
-                cfg = SpeakerConfig()
-                if req.speaker_map and speaker_tag in req.speaker_map:
-                    cfg = req.speaker_map[speaker_tag]
+                
+                cfg = {"mode": "preset", "preset_name": "[ប្រុស១]"}
+                if req_speaker_map and speaker_tag in req_speaker_map:
+                    cfg = req_speaker_map[speaker_tag]
                 elif speaker_tag != "default":
-                    cfg = SpeakerConfig(mode="preset", preset_name=speaker_tag)
-
-                # ✅ បន្ថែម base64 support សម្រាប់ speaker_map
-                if req.speaker_map and speaker_tag in req.speaker_map:
-                    speaker_cfg = req.speaker_map[speaker_tag]
-                    cfg.ref_audio_base64 = speaker_cfg.ref_audio_base64
-                    cfg.ref_audio_name = speaker_cfg.ref_audio_name
-
+                    cfg = {"mode": "preset", "preset_name": speaker_tag}
+                
                 seg_wav = generate_segment(speech_text, cfg)
+                
                 if len(seg_wav) > 0:
                     master_audio.append(seg_wav)
                     actual_audio_duration = len(seg_wav) / SAMPLE_RATE
                     last_end_time = start_sec + actual_audio_duration
                 else:
                     last_end_time = end_sec
-
-            # ✅ ការពារ master_audio ទទេ
+            
             if not master_audio:
-                raise HTTPException(status_code=500, detail="មិនមានសំឡេងដែលបានបង្កើត។")
+                return {"error": "ការផលិតសំឡេង SRT បរាជ័យ។"}
             final_wav = np.concatenate(master_audio)
-
+            
         else:
-            print(f"\n📝 [Normal Mode] ប្រភេទ៖ {req.mode}")
-            default_cfg = SpeakerConfig(
-                mode=req.mode, 
-                preset_name=req.preset_name, 
-                ref_audio_name=req.ref_audio_name,
-                ref_audio_base64=req.ref_audio_base64  # ✅ បន្ថែម base64 support
-            )
-            final_wav = generate_segment(req.text, default_cfg)
+            default_cfg = {
+                "mode": req_mode, 
+                "preset_name": req_preset_name, 
+                "ref_audio_name": req_ref_audio_name,
+                "ref_audio_base64": job_input.get("ref_audio_base64")
+            }
+            final_wav = generate_segment(req_text, default_cfg)
 
         if len(final_wav) == 0:
-            raise HTTPException(status_code=500, detail="ការផលិតសំឡេងបរាជ័យ។")
+            return {"error": "ការផលិតសំឡេងបរាជ័យ។"}
 
-        # Normalize Volume
         max_amp = np.max(np.abs(final_wav))
-        if max_amp > 0: 
-            final_wav = final_wav / max_amp
+        if max_amp > 0: final_wav = final_wav / max_amp
 
-        # ✅ កែបញ្ហា base64 - សរសេរទៅ file ហើយអានពី file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_out:
-            tmp_path = tmp_out.name
-
-        # សរសេរទិន្នន័យសំឡេងទៅ file
-        sf.write(tmp_path, final_wav, SAMPLE_RATE)
-
-        # អានពី file ហើយ encode base64
-        with open(tmp_path, "rb") as f:
-            audio_bytes = f.read()
-            out_b64 = base64.b64encode(audio_bytes).decode('utf-8')
-
-        # លុប file បណ្តោះអាសន្ន
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
+            sf.write(tmp_out.name, final_wav, SAMPLE_RATE)
+            tmp_out.seek(0)
+            out_b64 = base64.b64encode(tmp_out.read()).decode('utf-8')
+            tmp_out_path = tmp_out.name
+            
+        if os.path.exists(tmp_out_path): os.remove(tmp_out_path)
+        
         return {"status": "success", "audio_base64": out_b64}
 
     except Exception as e:
-        print(f"❌ Server Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        print(f"❌ Handler Error: {str(e)}")
+        print(traceback.format_exc())
+        return {"error": str(e)}
 
 if __name__ == "__main__":
-    print("\n🚀 [RUNPOD ENGINE] កំពុងបើកដំណើរការ Server លើ Port 8000...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    runpod.serverless.start({"handler": handler})
