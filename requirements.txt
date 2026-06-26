@@ -1,19 +1,13 @@
---index-url https://download.pytorch.org/whl/cu121
-torch>=2.2.0
-torchaudio>=2.2.0
+# ✅ ប្រែប្រាួល: torch ត្រូវ install ជាមួយ CUDA 12.1 ជាមុនសិននៅ Dockerfile
+# កុំដាក់ torch នៅទីនេះ ព្រោះបាន install នៅ Dockerfile ហើយ
 
-# Transformers & HuggingFace
 transformers>=4.36.0
 safetensors>=0.4.0
 accelerate>=0.25.0
 huggingface-hub>=0.19.0
-
-# Audio processing
 numpy
 scipy
 soundfile
 pydub
 tqdm
-
-# RunPod
 runpod
