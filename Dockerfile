@@ -1,22 +1,37 @@
-# ប្រើ Base Image របស់ PyTorch
-FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
+FROM nvidia/cuda:12.1.0-cudnn8-devel-ubuntu22.04
 
-# ដំឡើង dependencies របស់ប្រព័ន្ធ
-# បន្ថែម libsndfile1 ដើម្បីធានាថា Library soundfile ដំណើរការបានរលូន
+WORKDIR /workspace
+
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
+    python3.10 \
+    python3-pip \
+    python3.10-dev \
     libsndfile1 \
+    libsndfile1-dev \
+    ffmpeg \
+    git \
+    wget \
+    curl \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# កំណត់កន្លែងធ្វើការ
-WORKDIR /app
+# Upgrade pip
+RUN python3.10 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# ដំឡើង Python dependencies
+# ✅ Install torch ជាមួយ CUDA 12.1 ជាមុនសិន (មិនអាចប្រើ --index-url ជាមួយ packages ផ្សេង)
+RUN python3.10 -m pip install --no-cache-dir \
+    torch==2.2.0+cu121 \
+    torchaudio==2.2.0+cu121 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Copy requirements ដែលគ្មាន torch
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# កូពី source code ទាំងអស់
-COPY . .
+# ✅ Install ផ្សេងទៀត
+RUN python3.10 -m pip install --no-cache-dir -r requirements.txt
 
-# ចាប់ផ្តើមដំណើរការ handler
-CMD ["python", "handler.py"]
+# Copy handler
+COPY handler.py .
+
+CMD ["python3.10", "-u", "handler.py"]
