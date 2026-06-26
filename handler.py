@@ -5,84 +5,47 @@ import tempfile
 import numpy as np
 import soundfile as sf
 import runpod
-
-# ✅ ប្រាកដថា torch import ជោគជ័យមុននឹង transformers
 import torch
-print(f"🔥 PyTorch version: {torch.__version__}")
-print(f"🔥 CUDA available: {torch.cuda.is_available()}")
 
-if torch.cuda.is_available():
-    print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
-    print(f"🔥 CUDA Version: {torch.version.cuda}")
-
-# ✅ Import transformers បន្ទាប់ពី torch
-from transformers import AutoModel, AutoTokenizer
+# ✅ Import voxcpm (មិនមែន transformers AutoModel ទេ)
+from voxcpm import VoxCPM
 from huggingface_hub import hf_hub_download
 
 # ==========================================
 # ✅ Device setup
 # ==========================================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-torch.backends.cudnn.benchmark = True
+print(f"🔥 PyTorch CUDA available: {torch.cuda.is_available()}")
+
+if torch.cuda.is_available():
+    print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
+    print(f"🔥 CUDA Version: {torch.version.cuda}")
+    print(f"🔥 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    torch.backends.cudnn.benchmark = True
+else:
+    print("⚠️ កំពុងដំណើរការលើ CPU!")
 
 # ==========================================
-# ✅ Load Model
+# ✅ Load VoxCPM2 Model
 # ==========================================
-print("⚙️ កំពុងទាញយក VoxCPM2 ពី Hugging Face...")
+print("⚙️ កំពុងដំឡើង VoxCPM2 Model...")
 REPO_ID = "Tha456/VoxCPM2"
-MODEL_DIR = "/workspace/VoxCPM2"
-os.makedirs(MODEL_DIR, exist_ok=True)
 
-# Download model files
-files_to_download = [
-    "model.safetensors",
-    "audiovae.pth",
-    "config.json",
-    "generation_config.json",
-    "preprocessor_config.json",
-    "tokenizer_config.json",
-    "vocab.json",
-    "merges.txt",
-    "special_tokens_map.json"
-]
-
-for filename in files_to_download:
-    try:
-        filepath = hf_hub_download(
-            repo_id=REPO_ID,
-            filename=filename,
-            local_dir=MODEL_DIR,
-            local_dir_use_symlinks=False
-        )
-        print(f"✅ Downloaded: {filename}")
-    except Exception as e:
-        print(f"⚠️ Could not download {filename}: {e}")
-
-# Load model
-print("⚙️ កំពុង Load Model...")
 try:
-    model = AutoModel.from_pretrained(MODEL_DIR, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
-    model = model.to(DEVICE)
-    model.eval()
-    print(f"✅ Model loaded on {DEVICE}!")
+    # ប្រើ VoxCPM.from_pretrained ត្រឹមត្រូវ
+    model = VoxCPM.from_pretrained(
+        REPO_ID,
+        load_denoiser=False,
+        device=DEVICE,
+        optimize=True  # torch.compile on CUDA
+    )
+    print(f"✅ Model loaded successfully!")
+    print(f"✅ Running on: {DEVICE}")
 except Exception as e:
-    print(f"❌ Error loading from local: {e}")
-    print("🔄 Trying to load from HuggingFace directly...")
-    model = AutoModel.from_pretrained(REPO_ID, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(REPO_ID, trust_remote_code=True)
-    model = model.to(DEVICE)
-    model.eval()
+    print(f"❌ Error loading model: {e}")
+    raise
 
-# torch.compile
-if DEVICE == "cuda" and hasattr(torch, 'compile'):
-    try:
-        model = torch.compile(model, mode="reduce-overhead")
-        print("✅ torch.compile enabled!")
-    except Exception as e:
-        print(f"⚠️ torch.compile failed: {e}")
-
-SAMPLE_RATE = 24000
+SAMPLE_RATE = model.tts_model.sample_rate
 print(f"✅ Sample Rate: {SAMPLE_RATE}Hz")
 
 # ==========================================
@@ -136,18 +99,18 @@ def prepare_reference_audio(filename: str) -> str:
 
 def _generate_single_audio(text_chunk: str, ref_wav_path: str = None) -> np.ndarray:
     try:
-        inputs = tokenizer(text_chunk, return_tensors="pt")
-        inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+        kwargs = {
+            "text": text_chunk,
+            "cfg_value": 2.5,
+            "inference_timesteps": 25,
+            "normalize": True,
+            "retry_badcase": True
+        }
         
-        with torch.no_grad():
-            output = model.generate(**inputs)
-            
-        if isinstance(output, torch.Tensor):
-            audio = output.cpu().numpy().squeeze()
-        else:
-            audio = np.array(output)
-            
-        return audio.astype(np.float32)
+        if ref_wav_path and os.path.exists(ref_wav_path):
+            kwargs["reference_wav_path"] = ref_wav_path
+        
+        return model.generate(**kwargs)
     except Exception as gen_err:
         print(f"❌ កំហុស: {str(gen_err)}")
         return np.array([], dtype=np.float32)
