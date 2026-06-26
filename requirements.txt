@@ -1,10 +1,7 @@
 runpod
-voxcpm
-huggingface-hub
-transformers
-scipy
 numpy
 soundfile
-pillow
-httpx
-requests
+voxcpm
+huggingface_hub
+torch
+pydub
