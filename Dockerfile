@@ -16,22 +16,22 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# ✅ Upgrade pip ជាមុនសិន
+# Upgrade pip
 RUN python3.10 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# ✅ Install torch ជាមួយ CUDA 12.1 (ត្រូវប្រើ pip install ដាច់ដោយឡែក)
+# ✅ Install torch ជាមួយ CUDA 12.1
 RUN python3.10 -m pip install --no-cache-dir \
     torch==2.2.0 \
     torchvision==0.17.0 \
     torchaudio==2.2.0 \
     --index-url https://download.pytorch.org/whl/cu121
 
-# ✅ Verify torch install
-RUN python3.10 -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+# ✅ Install voxcpm package (សំខាន់!)
+RUN python3.10 -m pip install --no-cache-dir voxcpm>=2.0.2
 
 # ✅ Install transformers និង dependencies ផ្សេងទៀត
 RUN python3.10 -m pip install --no-cache-dir \
-    transformers==4.36.2 \
+    transformers>=4.36.0 \
     safetensors>=0.4.0 \
     accelerate>=0.25.0 \
     huggingface-hub>=0.19.0 \
@@ -42,8 +42,9 @@ RUN python3.10 -m pip install --no-cache-dir \
     tqdm \
     runpod
 
-# ✅ Verify transformers can import torch
-RUN python3.10 -c "from transformers import AutoModel; print('Transformers + PyTorch OK!')"
+# ✅ Verify installations
+RUN python3.10 -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA: {torch.cuda.is_available()}')"
+RUN python3.10 -c "from voxcpm import VoxCPM; print('VoxCPM package OK!')"
 
 # Copy handler
 COPY handler.py .
