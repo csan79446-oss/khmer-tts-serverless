@@ -5,21 +5,25 @@ import tempfile
 import numpy as np
 import soundfile as sf
 import runpod
-import torch
 
-# ==========================================
-# ✅ កំណត់ Device
-# ==========================================
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"🔥 PyTorch CUDA available: {torch.cuda.is_available()}")
+# ✅ ប្រាកដថា torch import ជោគជ័យមុននឹង transformers
+import torch
+print(f"🔥 PyTorch version: {torch.__version__}")
+print(f"🔥 CUDA available: {torch.cuda.is_available()}")
 
 if torch.cuda.is_available():
     print(f"🔥 GPU: {torch.cuda.get_device_name(0)}")
     print(f"🔥 CUDA Version: {torch.version.cuda}")
-    print(f"🔥 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
-    torch.backends.cudnn.benchmark = True
-else:
-    print("⚠️ កំពុងដំណើរការលើ CPU!")
+
+# ✅ Import transformers បន្ទាប់ពី torch
+from transformers import AutoModel, AutoTokenizer
+from huggingface_hub import hf_hub_download
+
+# ==========================================
+# ✅ Device setup
+# ==========================================
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+torch.backends.cudnn.benchmark = True
 
 # ==========================================
 # ✅ Load Model
@@ -28,9 +32,6 @@ print("⚙️ កំពុងទាញយក VoxCPM2 ពី Hugging Face...")
 REPO_ID = "Tha456/VoxCPM2"
 MODEL_DIR = "/workspace/VoxCPM2"
 os.makedirs(MODEL_DIR, exist_ok=True)
-
-from huggingface_hub import hf_hub_download
-from transformers import AutoModel, AutoTokenizer
 
 # Download model files
 files_to_download = [
@@ -66,8 +67,8 @@ try:
     model.eval()
     print(f"✅ Model loaded on {DEVICE}!")
 except Exception as e:
-    print(f"❌ Error loading model: {e}")
-    # Fallback
+    print(f"❌ Error loading from local: {e}")
+    print("🔄 Trying to load from HuggingFace directly...")
     model = AutoModel.from_pretrained(REPO_ID, trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(REPO_ID, trust_remote_code=True)
     model = model.to(DEVICE)
