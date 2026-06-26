@@ -7,7 +7,7 @@ import soundfile as sf
 import runpod
 import torch
 
-# ✅ Import voxcpm (មិនមែន transformers AutoModel ទេ)
+# ✅ Import voxcpm (official package!)
 from voxcpm import VoxCPM
 from huggingface_hub import hf_hub_download
 
@@ -29,15 +29,14 @@ else:
 # ✅ Load VoxCPM2 Model
 # ==========================================
 print("⚙️ កំពុងដំឡើង VoxCPM2 Model...")
-REPO_ID = "Tha456/VoxCPM2"
+REPO_ID = "openbmb/VoxCPM2"  # ✅ Official repo!
 
 try:
-    # ប្រើ VoxCPM.from_pretrained ត្រឹមត្រូវ
+    # ✅ ប្រើ VoxCPM.from_pretrained ត្រឹមត្រូវ
     model = VoxCPM.from_pretrained(
         REPO_ID,
         load_denoiser=False,
-        device=DEVICE,
-        optimize=True  # torch.compile on CUDA
+        device=DEVICE
     )
     print(f"✅ Model loaded successfully!")
     print(f"✅ Running on: {DEVICE}")
@@ -80,7 +79,7 @@ def prepare_reference_audio(filename: str) -> str:
     if not os.path.exists(local_path):
         print(f"📥 កំពុងទាញយក {filename}...")
         try:
-            hf_hub_download(repo_id=REPO_ID, filename=filename, local_dir=local_dir, local_dir_use_symlinks=False)
+            hf_hub_download(repo_id="Tha456/VoxCPM2", filename=filename, local_dir=local_dir, local_dir_use_symlinks=False)
         except Exception as e:
             print(f"⚠️ ការទាញយកបរាជ័យ: {e}")
             return None
